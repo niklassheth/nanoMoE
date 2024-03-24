@@ -79,7 +79,7 @@ class Router(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.top_k = config.top_k
-        assert self.top_k > 1
+        assert self.top_k > 1 and self.top_k <= config.n_exp
         self.use_noisy_top_k = config.use_noisy_top_k
 
         # linear projection for (noisy) softmax gating
@@ -115,6 +115,45 @@ class MLP(nn.Module):
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
+
+class SparseMOE(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.router = Router(config) # (noisy) top k router
+
+        # each expert is just an individual MLP
+        self.experts = nn.ModuleList([MLP(config) for _ in range(config.n_exp)])
+    
+    def forward(self, x: torch.Tensor):
+        B, T, n_embd = x.size() # track original shape of input
+
+        # pass each token through the router
+        router_out, top_k_ind = self.router(x)
+
+        # combine batch and sequence length dimensions
+        x = x.view(-1, x.size(-1))
+        router_out = router_out.view(-1, router_out.size(-1))
+        top_k_ind = top_k_ind.view(-1, top_k_ind.size(-1))
+
+        # compute outputs for each expert
+        output = torch.zeros_like(x)
+        for i in range(len(self.experts)):
+            # find tokens allocated to this expert
+            expert_mask = (top_k_ind == i).any(dim=-1)
+
+            # pass those tokens through the expert 
+            expert_out = self.experts[i](x[expert_mask, :])
+
+            # multiply expert output by probabilities
+            expert_probs = router_out[expert_mask, i]
+            expert_out = expert_out * expert_probs[:, None]
+
+            # add expert to running output
+            output[expert_mask] += expert_out
+        
+        # resize output before return
+        return output.view(B, T, n_embd)
 
 class Block(nn.Module):
 
