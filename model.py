@@ -74,6 +74,31 @@ class CausalSelfAttention(nn.Module):
         # output projection
         y = self.resid_dropout(self.c_proj(y))
         return y
+    
+class Router(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.top_k = config.top_k
+        assert self.top_k > 1
+        self.use_noisy_top_k = config.use_noisy_top_k
+
+        # linear projection for (noisy) softmax gating
+        self.w_g = nn.Linear(config.n_embd, config.n_exp)
+        if self.use_noisy_top_k:
+            self.w_noise = nn.Linear(config.n_embd, config.n_exp)
+
+    
+    def forward(self, x):
+        logits = self.w_g(x) # [B, T, n_embd] -> [B, T, n_exp]
+        if self.use_noisy_top_k:
+            noise = F.softplus(self.w_noise(x))
+            noise *= torch.randn_like(noise)
+            logits += noise
+        top_k_logits, top_k_indices = logits.topk(self.top_k, dim=-1)
+        router_output = torch.full_like(logits, float('-inf'))
+        router_output.scatter_(-1, top_k_indices, top_k_logits)
+        router_output = F.softmax(router_output, dim=-1)
+        return router_output, top_k_indices
 
 class MLP(nn.Module):
 
@@ -112,6 +137,9 @@ class GPTConfig:
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
+    n_exp: int = 1 # if n_exp = 1 we just use regular MLP layers
+    top_k: int = 2
+    use_noisy_top_k: bool = False
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
 
