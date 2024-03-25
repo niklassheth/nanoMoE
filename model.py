@@ -76,16 +76,22 @@ class CausalSelfAttention(nn.Module):
         return y
     
 class Router(nn.Module):
-    def __init__(self, config):
+    def __init__(self, gpt_config, moe_config):
         super().__init__()
-        self.top_k = config.top_k
-        assert self.top_k > 1 and self.top_k <= config.n_exp
-        self.use_noisy_top_k = config.use_noisy_top_k
+        assert moe_config is not None
+        self.top_k = moe_config.top_k
+        self.n_exp = moe_config.n_exp
+        assert self.top_k > 1 and self.top_k <= moe_config.n_exp
+        self.use_noisy_top_k = moe_config.use_noisy_top_k
+        self.use_aux_loss = moe_config.use_aux_loss
 
         # linear projection for (noisy) softmax gating
-        self.w_g = nn.Linear(config.n_embd, config.n_exp)
+        self.w_g = nn.Linear(gpt_config.n_embd, moe_config.n_exp)
         if self.use_noisy_top_k:
-            self.w_noise = nn.Linear(config.n_embd, config.n_exp)
+            self.w_noise = nn.Linear(gpt_config.n_embd, moe_config.n_exp)
+
+        # setup for auxiliary loss functions
+        self._aux_loss = None
 
     
     def forward(self, x):
@@ -95,10 +101,36 @@ class Router(nn.Module):
             noise *= torch.randn_like(noise)
             logits += noise
         top_k_logits, top_k_indices = logits.topk(self.top_k, dim=-1)
+
+        # normalize expert probabilities
+        # TODO: should we normalize over all experts or just topk?
         router_output = torch.full_like(logits, float('-inf'))
         router_output.scatter_(-1, top_k_indices, top_k_logits)
         router_output = F.softmax(router_output, dim=-1)
+
+        # compute auxiliary losses
+        if self.use_aux_loss:
+            self._aux_loss = self.compute_aux_loss(router_output, top_k_indices)
         return router_output, top_k_indices
+    
+    def compute_aux_loss(self, expert_probs: torch.Tensor, indices: torch.Tensor):
+        """
+        Computes Switch Transformer auxiliary loss (https://arxiv.org/abs/2101.03961)
+        See equations (4)-(6) on page 7
+        """
+        B, T, k = indices.size()
+
+        # equation (5): compute ratio of tokens allocated to each expert 
+        with torch.no_grad():
+            one_hot_indices = F.one_hot(indices, num_classes=self.n_exp)
+            tokens_per_expert = torch.sum(one_hot_indices, dim=(0, 1, 2)) / (B * T)
+    
+        # equation (6): compute ratio of router probability allocated to each expert
+        prob_per_expert = torch.sum(expert_probs, dim=(0, 1)) / (B * T)
+
+        # equation (4): take a scaled dot product between prob/token allocation vectors
+        return self.n_exp * torch.sum(prob_per_expert * tokens_per_expert)
+
 
 class MLP(nn.Module):
 
@@ -118,12 +150,12 @@ class MLP(nn.Module):
 
 class SparseMOE(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, gpt_config, moe_config):
         super().__init__()
-        self.router = Router(config) # (noisy) top k router
+        self.router = Router(gpt_config, moe_config) # (noisy) top k router
 
         # each expert is just an individual MLP
-        self.experts = nn.ModuleList([MLP(config) for _ in range(config.n_exp)])
+        self.experts = nn.ModuleList([MLP(gpt_config) for _ in range(moe_config.n_exp)])
     
     def forward(self, x: torch.Tensor):
         B, T, n_embd = x.size() # track original shape of input
@@ -176,11 +208,15 @@ class GPTConfig:
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
-    n_exp: int = 1 # if n_exp = 1 we just use regular MLP layers
-    top_k: int = 2
-    use_noisy_top_k: bool = False
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+
+@dataclass
+class MOEConfig:
+    n_exp: int = 1 # if n_exp = 1 we just use regular MLP layers
+    top_k: int = 2
+    use_aux_loss: bool = False # apply auxiliary loss (from Switch Transformer) in router
+    use_noisy_top_k: bool = False
 
 class GPT(nn.Module):
 
