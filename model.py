@@ -84,6 +84,7 @@ class Router(nn.Module):
         assert self.top_k > 1 and self.top_k <= moe_config.n_exp
         self.use_noisy_top_k = moe_config.use_noisy_top_k
         self.use_aux_loss = moe_config.use_aux_loss
+        self.use_router_z_loss = moe_config.use_router_z_loss
 
         # linear projection for (noisy) softmax gating
         self.w_g = nn.Linear(gpt_config.n_embd, moe_config.n_exp)
@@ -92,14 +93,24 @@ class Router(nn.Module):
 
         # setup for auxiliary loss functions
         self._aux_loss = None
+        self._z_loss = None
 
     
     def forward(self, x):
+        # router logits
         logits = self.w_g(x) # [B, T, n_embd] -> [B, T, n_exp]
+
+        # compute router z loss
+        if self.use_router_z_loss:
+            self._z_loss = self.compute_router_z_loss(logits)
+    
+        # add noise to the top k router
         if self.use_noisy_top_k:
             noise = F.softplus(self.w_noise(x))
             noise *= torch.randn_like(noise)
             logits += noise
+
+        # find top k experts for each token
         top_k_logits, top_k_indices = logits.topk(self.top_k, dim=-1)
 
         # normalize expert probabilities
@@ -108,7 +119,7 @@ class Router(nn.Module):
         router_output.scatter_(-1, top_k_indices, top_k_logits)
         router_output = F.softmax(router_output, dim=-1)
 
-        # compute auxiliary losses
+        # compute auxiliary load balancing loss
         if self.use_aux_loss:
             self._aux_loss = self.compute_aux_loss(router_output, top_k_indices)
         return router_output, top_k_indices
@@ -118,7 +129,7 @@ class Router(nn.Module):
         Computes Switch Transformer auxiliary loss (https://arxiv.org/abs/2101.03961)
         See equations (4)-(6) on page 7
         """
-        B, T, k = indices.size()
+        B, T, _ = indices.size()
 
         # equation (5): compute ratio of tokens allocated to each expert 
         with torch.no_grad():
@@ -130,7 +141,26 @@ class Router(nn.Module):
 
         # equation (4): take a scaled dot product between prob/token allocation vectors
         return self.n_exp * torch.sum(prob_per_expert * tokens_per_expert)
+    
+    def compute_router_z_loss(self, logits: torch.Tensor):
+        """
+        Computes ST-MoE router z loss (https://arxiv.org/abs/2202.08906)
+        See equation (5) on page 7
+        """
 
+        B, T, _ = logits.size()
+    
+        # exponentiate the logits
+        z_loss = torch.exp(logits)
+
+        # sum over logits for each expert
+        z_loss = torch.sum(z_loss, dim=-1)
+
+        # take log and square the summed logits
+        z_loss = torch.log(z_loss) ** 2.0
+
+        # sum over all tokens and divide by total number of tokens
+        return torch.sum(z_loss) / (B * T)
 
 class MLP(nn.Module):
 
@@ -216,6 +246,7 @@ class MOEConfig:
     n_exp: int = 1 # if n_exp = 1 we just use regular MLP layers
     top_k: int = 2
     use_aux_loss: bool = False # apply auxiliary loss (from Switch Transformer) in router
+    use_router_z_loss: bool = False # apply router z loss (from ST-MoE)
     use_noisy_top_k: bool = False
 
 class GPT(nn.Module):
