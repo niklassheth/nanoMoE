@@ -15,6 +15,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+from manager import MANAGER
+
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
 
@@ -76,24 +78,19 @@ class CausalSelfAttention(nn.Module):
         return y
     
 class Router(nn.Module):
-    def __init__(self, gpt_config, moe_config):
+    def __init__(self, config):
         super().__init__()
-        assert moe_config is not None
-        self.top_k = moe_config.top_k
-        self.n_exp = moe_config.n_exp
-        assert self.top_k > 1 and self.top_k <= moe_config.n_exp
-        self.use_noisy_top_k = moe_config.use_noisy_top_k
-        self.use_aux_loss = moe_config.use_aux_loss
-        self.use_router_z_loss = moe_config.use_router_z_loss
+        self.top_k = config.top_k
+        self.n_exp = config.n_exp
+        assert self.top_k > 1 and self.top_k <= config.n_exp
+        self.use_noisy_top_k = config.use_noisy_top_k
+        self.use_aux_loss = config.use_aux_loss
+        self.use_router_z_loss = config.use_router_z_loss
 
         # linear projection for (noisy) softmax gating
-        self.w_g = nn.Linear(gpt_config.n_embd, moe_config.n_exp)
+        self.w_g = nn.Linear(config.n_embd, config.n_exp)
         if self.use_noisy_top_k:
-            self.w_noise = nn.Linear(gpt_config.n_embd, moe_config.n_exp)
-
-        # setup for auxiliary loss functions
-        self._aux_loss = None
-        self._z_loss = None
+            self.w_noise = nn.Linear(config.n_embd, config.n_exp)
 
     
     def forward(self, x):
@@ -102,7 +99,8 @@ class Router(nn.Module):
 
         # compute router z loss
         if self.use_router_z_loss:
-            self._z_loss = self.compute_router_z_loss(logits)
+            z_loss = self.compute_router_z_loss(logits)
+            MANAGER.add_router_z_loss(z_loss)
     
         # add noise to the top k router
         if self.use_noisy_top_k:
@@ -121,7 +119,9 @@ class Router(nn.Module):
 
         # compute auxiliary load balancing loss
         if self.use_aux_loss:
-            self._aux_loss = self.compute_aux_loss(router_output, top_k_indices)
+            aux_loss = self.compute_aux_loss(router_output, top_k_indices)
+            MANAGER.add_aux_loss(aux_loss)
+
         return router_output, top_k_indices
     
     def compute_aux_loss(self, expert_probs: torch.Tensor, indices: torch.Tensor):
@@ -179,13 +179,12 @@ class MLP(nn.Module):
         return x
 
 class SparseMOE(nn.Module):
-
-    def __init__(self, gpt_config, moe_config):
+    def __init__(self, config):
         super().__init__()
-        self.router = Router(gpt_config, moe_config) # (noisy) top k router
+        self.router = Router(config) # (noisy) top k router
 
         # each expert is just an individual MLP
-        self.experts = nn.ModuleList([MLP(gpt_config) for _ in range(moe_config.n_exp)])
+        self.experts = nn.ModuleList([MLP(config) for _ in range(config.n_exp)])
     
     def forward(self, x: torch.Tensor):
         B, T, n_embd = x.size() # track original shape of input
@@ -219,12 +218,15 @@ class SparseMOE(nn.Module):
 
 class Block(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, use_moe=False):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(config)
+        self.attn = CausalSelfAttention(gpt_config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
-        self.mlp = MLP(config)
+        if use_moe:
+            self.mlp = SparseMOE(config)
+        else:
+            self.mlp = MLP(config)
 
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
@@ -241,13 +243,15 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
 
-@dataclass
-class MOEConfig:
+    # MoE-related configs 
     n_exp: int = 1 # if n_exp = 1 we just use regular MLP layers
     top_k: int = 2
     use_aux_loss: bool = False # apply auxiliary loss (from Switch Transformer) in router
     use_router_z_loss: bool = False # apply router z loss (from ST-MoE)
     use_noisy_top_k: bool = False
+    aux_loss_weight: float = 0.001 # default setting from ST-MoE (see page 8)
+    router_z_loss_weight: float = 0.01 # default setting from Switch Transformer (see page 8)
+    stride: int = 2 # one in every stride layers are converted to an MoE
 
 class GPT(nn.Module):
 
@@ -257,11 +261,22 @@ class GPT(nn.Module):
         assert config.block_size is not None
         self.config = config
 
+        if config.n_exp == 1:
+            # create normal transformer blocks
+            blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+        else:
+            # create transformer blocks, placing an MoE block every stride layers
+            blocks = []
+            for i in range(config.n_layer):
+                use_moe = (i % config.stride) == 0
+                blocks.append(Block(config, use_moe=use_moe))
+            blocks = nn.ModuleList(blocks)
+
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            h = blocks,
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -319,6 +334,14 @@ class GPT(nn.Module):
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+
+            # add the auxiliary losses to the main loss
+            if self.config.n_exp > 1 and self.config.use_aux_loss:
+                loss += self.config.aux_loss_weight * MANAGER.aggregate_aux_loss()
+                MANAGER.reset_aux_loss()
+            if self.config.n_exp > 1 and self.config.use_router_z_loss:
+                loss += self.config.router_z_loss_weight * MANAGER.aggregate_router_z_loss()
+                MANAGER.reset_router_z_loss()
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
@@ -461,4 +484,4 @@ class GPT(nn.Module):
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
 
-        return idx
+        return idx   
