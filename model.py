@@ -91,9 +91,9 @@ class Router(nn.Module):
         self.min_capacity = config.min_capacity
 
         # linear projection for (noisy) softmax gating
-        self.w_g = nn.Linear(config.n_embd, config.n_exp)
-        if self.use_noisy_top_k:
-            self.w_noise = nn.Linear(config.n_embd, config.n_exp)
+        # no bias is used, see page 4 eq (4) in (https://arxiv.org/abs/1701.06538)
+        self.w_g = nn.Linear(config.n_embd, config.n_exp, bias=False)
+        self.w_noise = nn.Linear(config.n_embd, config.n_exp, bias=False) if self.use_noisy_top_k else None
 
     
     def forward(self, x):
@@ -253,12 +253,11 @@ class MLPExperts(nn.Module):
         # TODO: add param init
         super().__init__()
         self.bias = config.bias
-        
+
         self.c_fc = nn.Parameter(torch.empty(config.n_exp, config.n_embd, 4 * config.n_embd))
         self.c_proj = nn.Parameter(torch.empty(config.n_exp, 4 * config.n_embd, config.n_embd))
-        if self.bias:
-            self.fc_bias = nn.Parameter(torch.empty(config.n_exp, 1, 4 * config.n_embd))
-            self.proj_bias = nn.Parameter(torch.empty(config.n_exp, 1, config.n_embd))
+        self.fc_bias = nn.Parameter(torch.empty(config.n_exp, 1, 4 * config.n_embd)) if self.bias else None
+        self.proj_bias = nn.Parameter(torch.empty(config.n_exp, 1, config.n_embd)) if self.bias else None
         self.gelu = nn.GELU()
         self.dropout = nn.Dropout(config.dropout)
         
@@ -312,7 +311,7 @@ class Block(nn.Module):
     def __init__(self, config, use_moe=False):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(gpt_config)
+        self.attn = CausalSelfAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         if use_moe:
             self.mlp = SparseMOE(config)
@@ -359,7 +358,7 @@ class GPT(nn.Module):
             # create normal transformer blocks
             blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
         else:
-            # create transformer blocks, placing an MoE block every stride layers
+            # create transformer blocks, placing an MoE block every <stride> layers
             blocks = []
             for i in range(config.n_layer):
                 use_moe = (i % config.stride) == 0
@@ -384,7 +383,7 @@ class GPT(nn.Module):
         self.apply(self._init_weights)
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
-            if pn.endswith('c_proj.weight'):
+            if pn.endswith('c_proj.weight') or pn.endswith('experts.c_proj'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
 
         # report number of parameters
@@ -408,20 +407,15 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, MLPExperts):
+            # have to init expert weights manually because nn.Parameter
+            # is not a type of module within PyTorch
+            torch.nn.init.normal_(module.c_fc, mean=0.0, std=0.02)
+            if module.fc_bias is not None:
+                torch.nn.init.zeros_(module.fc_bias)
+                torch.nn.init.zeros_(module.proj_bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-        # TODO: add init for experts
-        # if self.expert_parallel is not None:
-        #     seed_ctx = Randomizer(get_ep_rank(self)).fork_rng(enable_cpu=True)
-        # else:
-        #     seed_ctx = Randomizer(42).fork_rng(enable_cpu=True)
-        # with seed_ctx:
-        #     if self.gated:
-        #         torch.nn.init.normal_(self.wi_gate, std=math.sqrt(0.1 / self.hidden_size))
-        #         torch.nn.init.normal_(self.wi_up, std=math.sqrt(0.1 / self.hidden_size))
-        #     else:
-        #         torch.nn.init.normal_(self.wi, std=math.sqrt(0.1 / self.hidden_size))
-        #     torch.nn.init.normal_(self.wo, std=math.sqrt(0.1 / self.intermediate_size))
 
     def forward(self, idx, targets=None):
         device = idx.device
@@ -469,6 +463,7 @@ class GPT(nn.Module):
 
     @classmethod
     def from_pretrained(cls, model_type, override_args=None):
+        assert not 'moe' in model_type, "Pretrained checkpoints not available for MoE"
         assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
         override_args = override_args or {} # default to empty dict
         # only dropout can be overridden see more notes below
@@ -532,8 +527,9 @@ class GPT(nn.Module):
         param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
         # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
         # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
-        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        # add an extra check for "bias" string to account for bias terms in MoE layers
+        decay_params = [p for n, p in param_dict.items() if (p.dim() >= 2 and not n.endswith('bias'))]
+        nodecay_params = [p for n, p in param_dict.items() if (p.dim() < 2 or n.endswith('bias'))]
         optim_groups = [
             {'params': decay_params, 'weight_decay': weight_decay},
             {'params': nodecay_params, 'weight_decay': 0.0}
