@@ -76,7 +76,7 @@ class CausalSelfAttention(nn.Module):
         # output projection
         y = self.resid_dropout(self.c_proj(y))
         return y
-    
+
 class Router(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -100,23 +100,22 @@ class Router(nn.Module):
         B, T, _ = x.size()
         num_tokens = B * T
 
-        # router logits
-        logits = self.w_g(x) # [B, T, n_embd] -> [B, T, n_exp]
 
-        # compute router z loss
-        # computed over logits (before softmax)
-        if self.use_router_z_loss:
-            z_loss = self.compute_router_z_loss(logits)
-            MANAGER.add_router_z_loss(z_loss)
-    
-        # add noise to the top k router
+        # eq (4) in (https://arxiv.org/abs/1701.06538)
+        logits = self.w_g(x) # [B, T, n_exp]
         if self.use_noisy_top_k:
+            # optionally add noise into the router
             noise = F.softplus(self.w_noise(x))
             noise *= torch.randn_like(noise)
             logits += noise
 
+        # router z loss, computed on logits (before softmax)
+        if self.use_router_z_loss:
+            z_loss = self.compute_router_z_loss(logits)
+            MANAGER.add_router_z_loss(z_loss)
+
         # find top k experts for each token
-        _, top_k_indices = logits.topk(self.top_k, dim=-1)
+        _, top_k_indices = logits.topk(self.top_k, dim=-1) # [B, T, k]
 
         # normalize expert probabilities
         # # TODO: should we normalize over all experts or just topk?
@@ -137,7 +136,6 @@ class Router(nn.Module):
 
         # compute expert capacity
         exp_capacity = self.get_capacity(num_tokens)
-        print(f'CAPACITY: {exp_capacity}')
 
         # make a multi-hot mask of chosen experts, size [B, T, n_exp]
         # entries are 0 if expert not chosen and 1 if expert chosen
@@ -155,7 +153,7 @@ class Router(nn.Module):
 
         # mask out entries that go beyond expert capacity
         # compute amount of used capacity
-        exp_mask *= torch.lt(exp_rank, exp_capacity) # [num_tokens, n_exp]
+        exp_mask *= torch.lt(exp_rank, exp_capacity) # [k, num_tokens, n_exp]
         used_capacity = torch.sum(exp_mask, dim=(0, 1)) # [n_exp]
 
         # mask rank to only include tokens that are selected
@@ -183,15 +181,16 @@ class Router(nn.Module):
         Computes Switch Transformer auxiliary loss (https://arxiv.org/abs/2101.03961)
         See equations (4)-(6) on page 7
         """
-        B, T, _ = indices.size()
 
-        # equation (5): compute ratio of tokens allocated to each expert 
+        # equation (5): compute ratio of tokens allocated to each expert
+        # total number of tokens is defined as total tokens in batch * k
+        # (k = 1) for the Switch Transformer
         with torch.no_grad():
-            one_hot_indices = F.one_hot(indices, num_classes=self.n_exp)
-            tokens_per_expert = torch.sum(one_hot_indices, dim=(0, 1, 2)) / (B * T)
-    
+            one_hot_indices = F.one_hot(indices, num_classes=self.n_exp) # [B, T, k, n_exp]
+            tokens_per_expert = torch.mean(one_hot_indices.float(), dim=(0, 1, 2))
+
         # equation (6): compute ratio of router probability allocated to each expert
-        prob_per_expert = torch.sum(expert_probs, dim=(0, 1)) / (B * T)
+        prob_per_expert = torch.mean(expert_probs.float(), dim=(0, 1))
 
         # equation (4): take a scaled dot product between prob/token allocation vectors
         return self.n_exp * torch.sum(prob_per_expert * tokens_per_expert)
@@ -201,33 +200,28 @@ class Router(nn.Module):
         Computes ST-MoE router z loss (https://arxiv.org/abs/2202.08906)
         See equation (5) on page 7
         """
-
-        B, T, _ = logits.size()
     
-        # exponentiate the logits
-        z_loss = torch.exp(logits)
-
-        # sum over logits for each expert
-        z_loss = torch.sum(z_loss, dim=-1)
-
-        # take log and square the summed logits
-        z_loss = torch.log(z_loss) ** 2.0
+        # exponentiate logits, sum logits of each expert, take log, and square
+        # code below is the same as:
+        # > z_loss = torch.exp(logits)
+        # > z_loss = torch.sum(z_loss, dim=-1)
+        # > z_loss = torch.log(z_loss) ** 2.0
+        z_loss = torch.logsumexp(logits, dim=-1) ** 2.0
 
         # sum over all tokens and divide by total number of tokens
-        return torch.sum(z_loss) / (B * T)
+        return torch.mean(z_loss)
 
     def get_capacity(self, tokens_per_batch):
         # expert capacity is given by (tokens_per_batch / num_experts) * capacity_factor
         # see eq (3) in Switch Transformer (https://arxiv.org/abs/2101.03961)
         capacity_factor = self.train_capacity if self.training else self.eval_capacity
         capacity = math.floor(self.top_k * capacity_factor * tokens_per_batch / self.n_exp)
-        capacity += capacity % 2
+        capacity += capacity % 2 # make sure capacity is an even number
         capacity = max(capacity, self.min_capacity) # use min capacity
         assert capacity > 0
         return int(capacity)
 
 class MLP(nn.Module):
-
     def __init__(self, config):
         super().__init__()
         self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
