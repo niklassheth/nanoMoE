@@ -333,8 +333,8 @@ class GPTConfig:
     use_aux_loss: bool = False # apply auxiliary loss (from Switch Transformer) in router
     use_router_z_loss: bool = False # apply router z loss (from ST-MoE)
     use_noisy_top_k: bool = False
-    aux_loss_weight: float = 0.001 # default setting from ST-MoE (see page 8)
-    router_z_loss_weight: float = 0.01 # default setting from Switch Transformer (see page 8)
+    aux_loss_weight: float = 0.01 # default setting from Switch Transformer (see page 8)
+    router_z_loss_weight: float = 0.001 # default setting from ST-MoE (see page 8)
     train_capacity: float = 1.25
     eval_capacity: float = 2.0
     min_capacity: int = 4
