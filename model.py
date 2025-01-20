@@ -104,6 +104,7 @@ class Router(nn.Module):
     def forward(self, x):
         # optionally run the router in full precision to avoid instability during training
         # see discussion on pg. 9 here: https://arxiv.org/abs/2101.03961
+        # setting enabled to False in autocast automatically puts everything in float32
         ctx = nullcontext() if not self.router_use_full_prec else torch.amp.autocast(enabled=False)
 
         with ctx:
@@ -351,11 +352,11 @@ class GPTConfig:
     use_aux_loss: bool = False # apply auxiliary loss (from Switch Transformer) in router
     use_router_z_loss: bool = False # apply router z loss (from ST-MoE)
     use_noisy_top_k: bool = False
-    aux_loss_weight: float = 0.01 # default setting from Switch Transformer (see page 8)
-    router_z_loss_weight: float = 0.001 # default setting from ST-MoE (see page 8)
-    train_capacity: float = 1.25
+    aux_loss_weight: float = 0.01 # default setting from Switch Transformer (see top of page 8)
+    router_z_loss_weight: float = 0.001 # default setting from ST-MoE (see page 8 eq. 6)
+    train_capacity: float = 1.25  # default setting from ST-MoE (see top of page 6)
     eval_capacity: float = 2.0
-    min_capacity: int = 4
+    min_capacity: int = 4  # minimum batch size to send to any single expert
     stride: int = 2 # one in every stride layers are converted to an MoE
     use_switch_tfm_init: bool = False  # use weight init scheme from Switch Transformer
     switch_tfm_init_scale: float = 1.0
@@ -504,7 +505,7 @@ class GPT(nn.Module):
             logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
 
-            # add the auxiliary losses to the main loss
+            # add the auxiliary load balancing loss and router z loss to the main loss
             if self.config.n_exp > 1 and self.config.use_aux_loss:
                 loss += self.config.aux_loss_weight * MANAGER.aggregate_aux_loss()
                 MANAGER.reset_aux_loss()

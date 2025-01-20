@@ -1,7 +1,7 @@
 class MOEManager:
     """
-    basic wrapper class for tracking auxiliary/balancing losses
-    across multiple MoE layers within the model
+    basic wrapper class for tracking, storing, and aggregating auxiliary
+    losses across multiple MoE layers in the model
     """
 
     def __init__(self):
