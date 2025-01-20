@@ -72,6 +72,7 @@ min_capacity = 4
 stride = 2
 use_switch_tfm_init = False
 switch_tfm_init_scale = 1.0  # recommended 0.1 for stability (pg.10, https://arxiv.org/abs/2101.03961)
+router_use_full_prec = False
 
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
@@ -174,7 +175,8 @@ model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=bloc
                   use_noisy_top_k=use_noisy_top_k, aux_loss_weight=aux_loss_weight,
                   router_z_loss_weight=router_z_loss_weight, train_capacity=train_capacity,
                   eval_capacity=eval_capacity, min_capacity=min_capacity, stride=stride,
-                  use_switch_tfm_init=use_switch_tfm_init, switch_tfm_init_scale=switch_tfm_init_scale) # start with model_args from command line
+                  use_switch_tfm_init=use_switch_tfm_init, switch_tfm_init_scale=switch_tfm_init_scale,
+                  router_use_full_prec=router_use_full_prec) # start with model_args from command line
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
