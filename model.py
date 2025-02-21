@@ -105,7 +105,8 @@ class Router(nn.Module):
         # optionally run the router in full precision to avoid instability during training
         # see discussion on pg. 9 here: https://arxiv.org/abs/2101.03961
         # setting enabled to False in autocast automatically puts everything in float32
-        ctx = nullcontext() if not self.router_use_full_prec else torch.amp.autocast(enabled=False)
+        device_type = 'cuda' if torch.cuda.is_available() else 'cpu' # for later use in torch.autocast
+        ctx = nullcontext() if not self.router_use_full_prec else torch.amp.autocast(device_type=device_type, enabled=False)
 
         with ctx:
             B, T, _ = x.size()
@@ -454,7 +455,7 @@ class GPT(nn.Module):
             if self.config.use_switch_tfm_init:
                 scale = self.config.switch_tfm_init_scale
 
-                c_fc_fan_in = self.c_fc.shape[-2]
+                c_fc_fan_in = module.c_fc.shape[-2]
                 c_fc_std = (scale / c_fc_fan_in) ** 0.5
                 torch.nn.init.trunc_normal_(
                     module.c_fc,
@@ -464,7 +465,7 @@ class GPT(nn.Module):
                     b=2*c_fc_std,
                 )
 
-                c_proj_fan_in = self.c_proj.shape[-2]
+                c_proj_fan_in = module.c_proj.shape[-2]
                 c_proj_std = (scale / c_proj_fan_in) ** 0.5
                 torch.nn.init.trunc_normal_(
                     module.c_proj,
