@@ -17,6 +17,8 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 """
 
 import os
+# os.environ['NCCL_P2P_DISABLE'] = '1'
+# os.environ['NCCL_IGNORE_DISABLED_P2P'] = '1'
 import time
 import math
 import pickle
@@ -24,6 +26,8 @@ from contextlib import nullcontext
 
 import numpy as np
 import torch
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
@@ -177,6 +181,9 @@ model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=bloc
                   eval_capacity=eval_capacity, min_capacity=min_capacity, stride=stride,
                   use_switch_tfm_init=use_switch_tfm_init, switch_tfm_init_scale=switch_tfm_init_scale,
                   router_use_full_prec=router_use_full_prec) # start with model_args from command line
+print('\n\n')
+print(model_args)
+print('\n\n')
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
