@@ -1,5 +1,5 @@
 
-# nanoGPT
+# nanoMoE
 
 ![nanoMoE](assets/nano-moe.png)
 
