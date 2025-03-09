@@ -1,7 +1,7 @@
 
 # nanoGPT
 
-![nanoMoE](assets/nano-moe.jpg)
+![nanoMoE](assets/nano-moe.png)
 
 The simplest, fastest repository for training/finetuning medium-sized MoE-based GPTs.
 This is a fork of [Andrej Karphathy](https://karpathy.ai/)'s [nanoGPT](https://github.com/karpathy/nanoGPT) repository, which is a simple but functional implementation of GPT-2 pretraining.
