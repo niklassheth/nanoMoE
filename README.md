@@ -1,13 +1,19 @@
 
 # nanoGPT
 
-![nanoGPT](assets/nanogpt.jpg)
+![nanoMoE](assets/nano-moe.jpg)
 
-The simplest, fastest repository for training/finetuning medium-sized GPTs. It is a rewrite of [minGPT](https://github.com/karpathy/minGPT) that prioritizes teeth over education. Still under active development, but currently the file `train.py` reproduces GPT-2 (124M) on OpenWebText, running on a single 8XA100 40GB node in about 4 days of training. The code itself is plain and readable: `train.py` is a ~300-line boilerplate training loop and `model.py` a ~300-line GPT model definition, which can optionally load the GPT-2 weights from OpenAI. That's it.
+The simplest, fastest repository for training/finetuning medium-sized MoE-based GPTs.
+This is a fork of [Andrej Karphathy](https://karpathy.ai/)'s [nanoGPT](https://github.com/karpathy/nanoGPT) repository, which is a simple but functional implementation of GPT-2 pretraining.
+nanoMoE edits the functionality of nanoGPT to support training of both standard (decoder-only) LLMs and MoE-based architectures, including all necessary stability tricks for training MoEs (e.g., auxiliary losses, proper weight initialization, mixed precision, etc.).
+Most of the changes related to MoE functionality have been made in `model.py`, while `train.py` and other evaluation-related files are left largely unchanged.
 
-![repro124m](assets/gpt2_124M_loss.png)
+![repro124m](assets/moe-loss.png)
 
-Because the code is so simple, it is very easy to hack to your needs, train new models from scratch, or finetune pretrained checkpoints (e.g. biggest one currently available as a starting point would be the GPT-2 1.3B model from OpenAI).
+Most of the changes related to MoE functionality have been made in `model.py`, while `train.py` and other evaluation-related files are left largely unchanged.
+We do include a manager for coordinating / storing the auxiliary losses of the MoE across multiple layers in `manager.py`.
+The main configuration file for training nanoMoE is `config/train_nano_moe.py`.
+Because the code is so simple, it is very easy to hack to your needs, train new models from scratch, or finetune pretrained checkpoints.
 
 ## install
 
