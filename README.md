@@ -6,7 +6,7 @@
 The simplest, fastest repository for training/finetuning medium-sized MoE-based GPTs.
 This is a fork of [Andrej Karphathy](https://karpathy.ai/)'s [nanoGPT](https://github.com/karpathy/nanoGPT) repository, which is a simple but functional implementation of GPT-2 pretraining.
 nanoMoE edits the functionality of nanoGPT to support training of both standard (decoder-only) LLMs and MoE-based architectures, including all necessary stability tricks for training MoEs (e.g., auxiliary losses, proper weight initialization, mixed precision, etc.).
-See the related [blog post](cameronrwolfe.substack.com/p/nano-moe) for full details on nanoMoE. 
+See the related [blog post](https://cameronrwolfe.substack.com/nano-moe) for full details on nanoMoE. 
 
 ![repro124m](assets/moe-loss.png)
 
@@ -33,7 +33,7 @@ Dependencies:
 
 ## quick start
 
-The [current configuration file](config/train_nano_moe.py) is created for a 2x3090 GPU on a single node.
+The [current configuration file](config/train_nano_moe.py) is created for a 2x3090 GPU setup on a single node.
 The full pretraining script trains nanoMoE, a 6-layer MoE-based decoder-only transformer with 8 experts and 2 active experts, on ~25B tokens of the OpenWebText dataset in ~5 days.
 If you have access to more GPUs, you can scale down `gradient_accumulation_steps` and scale up the `batch_size` accordingly.
 You can also scale up `max_iters` to increase the number of tokens on which nanoMoE is trained.
@@ -114,7 +114,7 @@ If you'd like to sample from a model you trained, use the `--out_dir` to point t
 
 Note that by default this repo uses PyTorch 2.0 (i.e. `torch.compile`). This is fairly new and experimental, and not yet available on all platforms (e.g. Windows). If you're running into related error messages try to disable this by adding `--compile=False` flag. This will slow down the code but at least it will run.
 
-For some context on this repository, GPT, and language modeling it might be helpful to watch Andrej's [Zero To Hero series](https://karpathy.ai/zero-to-hero.html). Specifically, the [GPT video](https://www.youtube.com/watch?v=kCc8FmEb1nY) is popular if you have some prior language modeling context. For context specifically on MoEs, check out the related [blog post](cameronrwolfe.substack.com/p/nano-moe) for this nanoMoE repository. 
+For some context on this repository, GPT, and language modeling it might be helpful to watch Andrej's [Zero To Hero series](https://karpathy.ai/zero-to-hero.html). Specifically, the [GPT video](https://www.youtube.com/watch?v=kCc8FmEb1nY) is popular if you have some prior language modeling context. For context specifically on MoEs, check out the related [blog post](https://cameronrwolfe.substack.com/nano-moe) for this nanoMoE repository. 
 
 For more questions/discussions feel free to stop by **#nanoGPT** on Discord:
 
