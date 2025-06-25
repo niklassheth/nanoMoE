@@ -136,7 +136,7 @@ class Router(nn.Module):
             # Shazeer et al (https://arxiv.org/abs/1701.06538) does only topk
             # see page 4 eq (3)-(5), the code for this is commented out below
             router_probs = torch.full_like(logits, float('-inf'))  # [B, T, n_exp]
-            router_probs.scatter_(-1, top_k_indices, top_k_logits)
+            router_probs.scatter_(-1, top_k_indices, top_k_logits.to(router_probs.dtype))
             router_probs = F.softmax(router_probs, dim=-1)
 
             # # normalize all router logits (not just top-k) via softmax      

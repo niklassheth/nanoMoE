@@ -10,7 +10,7 @@ wandb_project = 'nano-moe'
 wandb_run_name ='gpt2-124M-moe-owt ' + time.strftime('%Y-%m-%d %H:%M:%S')
 
 # model/moe settings
-n_exp = 8
+n_exp = 4
 top_k = 2
 use_aux_loss = True
 aux_loss_weight = 0.01
@@ -30,9 +30,9 @@ n_embd = 384
 
 # these make the total batch size be ~0.5M
 # 12 batch size * 1024 block size * 5 gradaccum * 8 GPUs = 491,520
-batch_size = 12
-block_size = 1024
-gradient_accumulation_steps = 5 * 8
+batch_size = 32
+block_size = 512
+gradient_accumulation_steps = 1
 
 # this makes total number of tokens be 25B
 max_iters = 50000
