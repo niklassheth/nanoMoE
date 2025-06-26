@@ -36,7 +36,7 @@ gradient_accumulation_steps = 2
 
 # epoch-based training
 max_epochs = 1
-evals_per_epoch = 10  # evaluate 10 times per epoch
+evals_per_epoch = 50
 
 # eval stuff
 eval_iters = 200
