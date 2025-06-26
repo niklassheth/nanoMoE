@@ -30,6 +30,7 @@ import torch._dynamo
 torch._dynamo.config.suppress_errors = True
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
+from torch.profiler import profile, record_function, ProfilerActivity
 
 from model import GPTConfig, GPT
 from data.tinystories.dataloader import get_dataloader
@@ -101,6 +102,14 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
+
+# profiling
+use_profiler = False # enable PyTorch profiler
+profiler_schedule_wait = 2 # number of steps to wait before profiling
+profiler_schedule_warmup = 2 # number of warmup steps
+profiler_schedule_active = 6 # number of active profiling steps
+profiler_schedule_repeat = 1 # number of times to repeat the schedule
+profiler_output_dir = './profiler_results' # directory to save profiler results
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 # Remove non-existent variables that were removed during epoch-based conversion
@@ -300,6 +309,32 @@ t0 = time.time()
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
 
+# Initialize profiler if enabled
+profiler = None
+if use_profiler and master_process:
+    os.makedirs(profiler_output_dir, exist_ok=True)
+    activities = [ProfilerActivity.CPU]
+    if device_type == 'cuda':
+        activities.append(ProfilerActivity.CUDA)
+    
+    profiler = profile(
+        activities=activities,
+        schedule=torch.profiler.schedule(
+            wait=profiler_schedule_wait,
+            warmup=profiler_schedule_warmup,
+            active=profiler_schedule_active,
+            repeat=profiler_schedule_repeat
+        ),
+        on_trace_ready=lambda trace: (
+            torch.profiler.tensorboard_trace_handler(profiler_output_dir)(trace),
+            trace.export_chrome_trace(os.path.join(profiler_output_dir, f"trace_{trace.profiler.step_num}.json"))
+        )[-1],
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True
+    )
+    profiler.start()
+
 for epoch in range(max_epochs):
     if master_process:
         print(f"\n=== Epoch {epoch + 1}/{max_epochs} ===")
@@ -349,27 +384,32 @@ for epoch in range(max_epochs):
 
         # forward backward update, with optional gradient accumulation to simulate larger batch size
         # and using the GradScaler if data type is float16
-        for micro_step in range(gradient_accumulation_steps):
-            if ddp:
-                # in DDP training we only need to sync gradients at the last micro step.
-                # the official way to do this is with model.no_sync() context manager, but
-                # I really dislike that this bloats the code and forces us to repeat code
-                # looking at the source of that context manager, it just toggles this variable
-                model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
-            with ctx:
-                logits, loss = model(X, Y)
-                loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
-            # backward pass, with gradient scaling if training in fp16
-            scaler.scale(loss).backward()
-        # clip the gradient
-        if grad_clip != 0.0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        # step the optimizer and scaler if training in fp16
-        scaler.step(optimizer)
-        scaler.update()
-        # flush the gradients as soon as we can, no need for this memory anymore
-        optimizer.zero_grad(set_to_none=True)
+        with record_function("forward_backward"):
+            for micro_step in range(gradient_accumulation_steps):
+                if ddp:
+                    # in DDP training we only need to sync gradients at the last micro step.
+                    # the official way to do this is with model.no_sync() context manager, but
+                    # I really dislike that this bloats the code and forces us to repeat code
+                    # looking at the source of that context manager, it just toggles this variable
+                    model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
+                with ctx:
+                    with record_function("forward"):
+                        logits, loss = model(X, Y)
+                        loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
+                # backward pass, with gradient scaling if training in fp16
+                with record_function("backward"):
+                    scaler.scale(loss).backward()
+        
+        with record_function("optimizer_step"):
+            # clip the gradient
+            if grad_clip != 0.0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            # step the optimizer and scaler if training in fp16
+            scaler.step(optimizer)
+            scaler.update()
+            # flush the gradients as soon as we can, no need for this memory anymore
+            optimizer.zero_grad(set_to_none=True)
 
         # timing and logging
         t1 = time.time()
@@ -397,6 +437,15 @@ for epoch in range(max_epochs):
                     "mfu": running_mfu*100,
                     "time_ms": dt*1000,
                 }, step=global_iter)
+        
+        # Profiler step
+        if profiler is not None:
+            profiler.step()
+
+# Stop profiler if it was started
+if profiler is not None:
+    profiler.stop()
+    print(f"Profiler results saved to {profiler_output_dir}")
 
 if ddp:
     destroy_process_group()
