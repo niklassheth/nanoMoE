@@ -9,6 +9,7 @@
 - Prevent cross doc attn (needs dataloader partial rewrite)
 
 ## Maybe:
+- Use muon
 - Add more features from deepseek:
   - Shared expert (plus fine grained MoE)
   - FP8

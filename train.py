@@ -23,6 +23,7 @@ import time
 import math
 import pickle
 from contextlib import nullcontext
+from tqdm import tqdm
 
 import torch
 import torch._dynamo
@@ -323,8 +324,11 @@ running_mfu = -1.0
 for epoch in range(max_epochs):
     if master_process:
         print(f"\n=== Epoch {epoch + 1}/{max_epochs} ===")
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{max_epochs}", unit="batch")
+    else:
+        pbar = train_loader
     
-    for batch_idx, (X, Y) in enumerate(train_loader):
+    for batch_idx, (X, Y) in enumerate(pbar):
         global_iter = epoch * iters_per_epoch + batch_idx
         
         # Move to device
@@ -402,7 +406,13 @@ for epoch in range(max_epochs):
             if global_iter >= 5: # let the training loop settle a bit
                 mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
                 running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
-            print(f"epoch {epoch + 1}, iter {global_iter}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+            
+            # Update tqdm progress bar with loss, time, and MFU
+            pbar.set_postfix({
+                'loss': f'{lossf:.4f}',
+                'time': f'{dt*1000:.2f}ms',
+                'mfu': f'{running_mfu*100:.2f}%'
+            })
 
 if ddp:
     destroy_process_group()
