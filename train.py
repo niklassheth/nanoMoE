@@ -38,7 +38,7 @@ from data.tinystories.dataloader import get_dataloader
 # default config values designed to train a gpt2 (124M) with epoch-based training
 # I/O
 out_dir = 'out'
-log_interval = 10
+log_interval = 25
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
