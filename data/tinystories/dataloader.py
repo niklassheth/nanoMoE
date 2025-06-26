@@ -75,52 +75,7 @@ def has_unfixable_corruption(text: str) -> bool:
     return False
 
 
-class TokenDataset(IterableDataset):
-    """Simple iterable dataset that yields random chunks from a binary token file"""
-    
-    def __init__(self, bin_path: str, block_size: int):
-        self.block_size = block_size
-        # Use memmap for efficient random access
-        self.data = np.memmap(bin_path, dtype=np.uint16, mode='r')
-        
-    def __iter__(self):
-        while True:
-            # Generate random starting position
-            start = torch.randint(0, len(self.data) - self.block_size, (1,)).item()
-            x = torch.from_numpy((self.data[start:start + self.block_size]).astype(np.int64))
-            y = torch.from_numpy((self.data[start + 1:start + self.block_size + 1]).astype(np.int64))
-            yield x, y
 
-class BlockDataset(torch.utils.data.Dataset):
-    """All (block_size+1)-token windows of the mem-mapped file."""
-    def __init__(self, bin_path: str, block_size: int):
-        self.data = np.memmap(bin_path, dtype=np.uint16, mode='r')
-        self.block_size = block_size
-        self.n_samples = len(self.data) - block_size      # every legal start pos
-
-    def __len__(self):
-        return self.n_samples
-
-    def __getitem__(self, idx):
-        a = self.data[idx:idx + self.block_size + 1].astype(np.int64)
-        x = torch.from_numpy(a[:-1])
-        y = torch.from_numpy(a[1:])
-        return x, y
-
-class LazyRandPermSampler(torch.utils.data.Sampler):
-    def __init__(self, length, chunk=10_000_000, generator=None):
-        self.length, self.chunk, self.gen = length, chunk, generator
-
-    def __iter__(self):
-        g = torch.default_generator if self.gen is None else self.gen
-        start = 0
-        while start < self.length:
-            n = min(self.chunk, self.length - start)
-            yield from (torch.randperm(n, generator=g) + start).tolist()
-            start += n
-
-    def __len__(self):
-        return self.length
 
 def prepare_data(data_dir=None):
     """
@@ -226,6 +181,26 @@ def prepare_data(data_dir=None):
     print(f"Val: {val_tokens:,} tokens")
     print(f"Vocab size: {tokenizer.n_vocab}")
 
+class ChunkDataset(torch.utils.data.Dataset):
+    """
+    Non-overlapping (or strided) chunks of a mem-mapped token array.
+    Every __getitem__(i) returns the i-th chunk, so the dataset has a
+    stable length and can be shuffled by a Sampler.
+    """
+    def __init__(self, bin_path: str, block_size: int, stride: int | None = None):
+        self.data       = np.memmap(bin_path, dtype=np.uint16, mode='r')
+        self.block_size = block_size
+        self.stride     = stride or block_size        # stride=block_size ⇒ no overlap
+        self.n_chunks   = (len(self.data) - 1 - block_size) // self.stride + 1
+
+    def __len__(self):
+        return self.n_chunks
+
+    def __getitem__(self, idx: int):
+        start = idx * self.stride
+        x = torch.from_numpy(self.data[start : start + self.block_size]).long()
+        y = torch.from_numpy(self.data[start + 1 : start + self.block_size + 1]).long()
+        return x, y
 
 def get_dataloader(
     data_dir: str,
@@ -244,7 +219,7 @@ def get_dataloader(
         batch_size: Batch size
         block_size: Sequence length
         num_workers: Number of DataLoader workers
-        shuffle: Whether to shuffle (not critical since we sample randomly)
+        shuffle: Whether to shuffle 
     
     Returns:
         DataLoader yielding (x, y) tensors of shape (batch_size, block_size)
@@ -258,14 +233,13 @@ def get_dataloader(
         )
     
     # Load dataset and create dataloader
-    dataset = BlockDataset(bin_path, block_size)
+    dataset = ChunkDataset(bin_path, block_size)
     print(f"Loaded {split} data: {len(dataset.data):,} tokens")
-    sampler = LazyRandPermSampler(len(dataset))
 
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
-        sampler=sampler,
+        shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
         drop_last=True
