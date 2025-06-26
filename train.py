@@ -183,28 +183,6 @@ print(f"  Evaluate every {eval_every_n_iters} iterations")
 print(f"  Tokens per iteration: {tokens_per_iter:,}")
 print(f"  Tokens per epoch: {tokens_per_epoch:,}")
 
-# Create evaluation iterators (we'll use direct DataLoader iteration for training)
-train_eval_iter = iter(train_loader)  # Separate iterator for training loss evaluation
-val_eval_iter = iter(val_loader)      # Persistent iterator for validation loss evaluation
-
-def get_next_batch_from_iter(iterator_name: str, loader):
-    """Get next batch from any iterator, resetting if exhausted"""
-    # Access the iterator from globals
-    iterator = globals()[iterator_name]
-    try:
-        x, y = next(iterator)
-    except StopIteration:
-        # Reset the iterator and update the global variable
-        iterator = iter(loader)
-        globals()[iterator_name] = iterator
-        x, y = next(iterator)
-    
-    # Move to device
-    if device_type == 'cuda':
-        x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-    else:
-        x, y = x.to(device), y.to(device)
-    return x, y
 
 
 # training state
@@ -270,32 +248,33 @@ if compile:
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 
-# helps estimate an arbitrarily accurate loss over either split using many batches
+# estimate validation loss using many batches
 @torch.no_grad()
 def estimate_loss():
-    out = {}
     model.eval()
     
-    # Train loss - use dedicated evaluation iterator
-    train_losses = torch.zeros(eval_iters)
-    for k in range(eval_iters):
-        X, Y = get_next_batch_from_iter('train_eval_iter', train_loader)
-        with ctx:
-            _, loss = model(X, Y)
-        train_losses[k] = loss.item()
-    out['train'] = train_losses.mean()
-    
-    # Validation loss - use persistent evaluation iterator
     val_losses = torch.zeros(eval_iters)
+    val_iter = iter(val_loader)
+    
     for k in range(eval_iters):
-        X, Y = get_next_batch_from_iter('val_eval_iter', val_loader)
+        try:
+            X, Y = next(val_iter)
+        except StopIteration:
+            val_iter = iter(val_loader)
+            X, Y = next(val_iter)
+        
+        # Move to device
+        if device_type == 'cuda':
+            X, Y = X.to(device, non_blocking=True), Y.to(device, non_blocking=True)
+        else:
+            X, Y = X.to(device), Y.to(device)
+            
         with ctx:
             _, loss = model(X, Y)
         val_losses[k] = loss.item()
-    out['val'] = val_losses.mean()
     
     model.train()
-    return out
+    return val_losses.mean()
 
 # learning rate decay scheduler (cosine with warmup)
 def get_lr(it):
@@ -344,19 +323,16 @@ for epoch in range(max_epochs):
 
         # evaluate the loss on train/val sets and write checkpoints
         if global_iter > 0 and global_iter % eval_every_n_iters == 0 and master_process:
-            losses = estimate_loss()
-            print(f"epoch {epoch + 1}, step {global_iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+            val_loss = estimate_loss()
+            print(f"epoch {epoch + 1}, step {global_iter}: val loss {val_loss:.4f}")
             if wandb_log:
                 wandb.log({
-                    "epoch": epoch + 1,
-                    "iter": global_iter,
-                    "train/loss": losses['train'],
-                    "val/loss": losses['val'],
+                    "val/loss": val_loss,
                     "lr": lr,
                     "mfu": running_mfu*100, # convert to percentage
-                })
-            if losses['val'] < best_val_loss or always_save_checkpoint:
-                best_val_loss = losses['val']
+                }, step=global_iter)
+            if val_loss < best_val_loss or always_save_checkpoint:
+                best_val_loss = val_loss
                 checkpoint = {
                     'model': raw_model.state_dict(),
                     'model_args': model_args,
@@ -367,8 +343,8 @@ for epoch in range(max_epochs):
                 torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
         if eval_only and epoch == 0 and batch_idx == 0:
             # Run one evaluation then exit
-            losses = estimate_loss()
-            print(f"eval_only mode: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+            val_loss = estimate_loss()
+            print(f"eval_only mode: val loss {val_loss:.4f}")
             break
 
         # forward backward update, with optional gradient accumulation to simulate larger batch size
@@ -413,6 +389,14 @@ for epoch in range(max_epochs):
                 'time': f'{dt*1000:.2f}ms',
                 'mfu': f'{running_mfu*100:.2f}%'
             })
+            
+            if wandb_log:
+                wandb.log({
+                    "train/loss_step": lossf,
+                    "lr": lr,
+                    "mfu": running_mfu*100,
+                    "time_ms": dt*1000,
+                }, step=global_iter)
 
 if ddp:
     destroy_process_group()
