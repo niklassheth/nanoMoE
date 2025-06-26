@@ -327,7 +327,7 @@ if use_profiler and master_process:
         ),
         on_trace_ready=lambda trace: (
             torch.profiler.tensorboard_trace_handler(profiler_output_dir)(trace),
-            trace.export_chrome_trace(os.path.join(profiler_output_dir, f"trace_{trace.profiler.step_num}.json"))
+            trace.export_chrome_trace(os.path.join(profiler_output_dir, f"trace_{int(time.time())}.json"))
         )[-1],
         record_shapes=True,
         profile_memory=True,
