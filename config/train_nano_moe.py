@@ -34,12 +34,11 @@ batch_size = 32
 block_size = 512
 gradient_accumulation_steps = 1
 
-# this makes total number of tokens be 25B
-max_iters = 50000
-lr_decay_iters = 50000
+# epoch-based training
+max_epochs = 1
+evals_per_epoch = 10  # evaluate 10 times per epoch
 
 # eval stuff
-eval_interval = 500
 eval_iters = 200
 log_interval = 10
 

@@ -11,3 +11,6 @@ input.txt
 env/
 venv/
 wandb/
+
+# Character analysis output files
+*_char_analysis.json

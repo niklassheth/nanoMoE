@@ -1,11 +1,11 @@
 ## Done:
 - Load tinystories
-
-## Very Soon:
 - Use the new dataloader
 
-## Soon:
+## Very Soon:
 - Train a new tokenizer
+
+## Soon:
 - Prevent cross doc attn (needs dataloader partial rewrite)
 
 ## Maybe:
