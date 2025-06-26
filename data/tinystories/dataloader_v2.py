@@ -14,6 +14,67 @@ from tqdm import tqdm
 import pickle
 
 
+def clean_text(text: str) -> str:
+    """
+    Clean UTF-8 encoding corruption artifacts, focusing on the most common issues.
+    Replaces corrupted characters with ASCII equivalents where possible.
+    """
+    # Most common corruptions from analysis (1.2M+ total occurrences)
+    corruption_fixes = {
+        'â€œ': '"',    # Left double quotation mark → ASCII quote
+        'â€': '"',     # Right double quotation mark → ASCII quote  
+        'â€™': "'",    # Right single quotation mark/apostrophe → ASCII apostrophe
+        'â€˜': "'",    # Left single quotation mark → ASCII apostrophe
+        'â€¦': '...',  # Horizontal ellipsis → ASCII dots
+        
+        # Additional fixable corruptions from remaining patterns
+        'Ã‰': 'É',     # É with acute
+        'Ã ': 'À',     # À with grave
+        'Ã¨': 'È',     # È with grave
+        'Ã©': 'é',     # é with acute
+        'Ã¡': 'á',     # á with acute
+        'Ã­': 'í',     # í with acute
+        'Ã³': 'ó',     # ó with acute
+        'Ãº': 'ú',     # ú with acute
+        'Ã±': 'ñ',     # ñ with tilde
+        'Ã¼': 'ü',     # ü with diaeresis
+        'Ã¤': 'ä',     # ä with diaeresis
+        'Ã¶': 'ö',     # ö with diaeresis
+        'ÃŸ': 'ß',     # German eszett
+        'Ã§': 'ç',     # ç with cedilla
+        'â"€': '—',    # Em dash
+        'â"': '–',     # En dash
+    }
+    
+    cleaned_text = text
+    for corrupted, clean in corruption_fixes.items():
+        cleaned_text = cleaned_text.replace(corrupted, clean)
+    
+    return cleaned_text
+
+
+def has_unfixable_corruption(text: str) -> bool:
+    """
+    Check if text contains unfixable corruption patterns after cleaning.
+    Only filters out complex multi-byte corruptions that can't be reasonably fixed.
+    """
+    import re
+    
+    # Only filter unfixable corruption patterns
+    unfixable_patterns = [
+        r'Ã¢â‚¬',      # Complex multi-byte quote corruptions
+        r'â∑',         # Mathematical symbols  
+        r'â[^\w\s"€™˜¦"—]',  # â followed by non-standard characters (but allow common punctuation)
+        r'Ã[^\s][^\w\s]',    # Ã followed by non-letter sequences
+    ]
+    
+    for pattern in unfixable_patterns:
+        if re.search(pattern, text):
+            return True
+            
+    return False
+
+
 class TokenDataset(IterableDataset):
     """Simple iterable dataset that yields random chunks from a binary token file"""
     
@@ -30,12 +91,48 @@ class TokenDataset(IterableDataset):
             y = torch.from_numpy((self.data[start + 1:start + self.block_size + 1]).astype(np.int64))
             yield x, y
 
+class BlockDataset(torch.utils.data.Dataset):
+    """All (block_size+1)-token windows of the mem-mapped file."""
+    def __init__(self, bin_path: str, block_size: int):
+        self.data = np.memmap(bin_path, dtype=np.uint16, mode='r')
+        self.block_size = block_size
+        self.n_samples = len(self.data) - block_size      # every legal start pos
+
+    def __len__(self):
+        return self.n_samples
+
+    def __getitem__(self, idx):
+        a = self.data[idx:idx + self.block_size + 1].astype(np.int64)
+        x = torch.from_numpy(a[:-1])
+        y = torch.from_numpy(a[1:])
+        return x, y
+
+class LazyRandPermSampler(torch.utils.data.Sampler):
+    def __init__(self, length, chunk=10_000_000, generator=None):
+        self.length, self.chunk, self.gen = length, chunk, generator
+
+    def __iter__(self):
+        g = torch.default_generator if self.gen is None else self.gen
+        start = 0
+        while start < self.length:
+            n = min(self.chunk, self.length - start)
+            yield from (torch.randperm(n, generator=g) + start).tolist()
+            start += n
+
+    def __len__(self):
+        return self.length
 
 def prepare_data(data_dir=None):
     """
     Download, tokenize, and save TinyStories dataset
     Run with: python dataloader_v2.py
+    
+    Args:
+        data_dir: Directory to save dataset files
     """
+    filter_corrupted_accents = True
+    clean_corruption = True
+
     if data_dir is None:
         data_dir = os.path.dirname(__file__)
     
@@ -57,9 +154,23 @@ def prepare_data(data_dir=None):
             num_proc=cores
         )
         
+        # Filter out stories with unfixable corruption (after attempting to clean)
+        if filter_corrupted_accents:
+            print("Filtering stories with unfixable corruption...")
+            def is_cleanable(example):
+                # Try cleaning first
+                cleaned = clean_text(example["text"]) if clean_corruption else example["text"]
+                # Only filter if still has unfixable corruption after cleaning
+                return not has_unfixable_corruption(cleaned)
+            
+            filtered = filtered.filter(is_cleanable, num_proc=cores)
+        
         # Tokenize each story and track lengths (like openwebtext)
         def tokenize_story(example):
-            tokens = tokenizer.encode_ordinary(example['text'])
+            text = example['text']
+            if clean_corruption:
+                text = clean_text(text)
+            tokens = tokenizer.encode_ordinary(text)
             tokens.append(eos_token)  # Add EOT after each story
             return {'tokens': tokens, 'len': len(tokens)}
         
@@ -147,18 +258,22 @@ def get_dataloader(
         )
     
     # Load dataset and create dataloader
-    dataset = TokenDataset(bin_path, block_size)
+    dataset = BlockDataset(bin_path, block_size)
     print(f"Loaded {split} data: {len(dataset.data):,} tokens")
+    sampler = LazyRandPermSampler(len(dataset))
+
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
-        # No shuffle for IterableDataset (and not needed since we sample randomly)
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
         drop_last=True
     )
     
     return dataloader
+
+
 
 
 if __name__ == "__main__":
@@ -183,7 +298,7 @@ if __name__ == "__main__":
         split="train", 
         batch_size=2,  # 2 sequences
         block_size=512,  # 512 tokens each
-        num_workers=0  # Keep at 0 for testing to avoid overhead
+        num_workers=0,  # Keep at 0 for testing to avoid overhead
     )
     
     # Test multiple batches
