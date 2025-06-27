@@ -100,99 +100,96 @@ class Router(nn.Module):
         # no bias is used, see page 4 eq (4) in (https://arxiv.org/abs/1701.06538)
         self.w_g = nn.Linear(config.n_embd, config.n_exp, bias=False)
         self.w_noise = nn.Linear(config.n_embd, config.n_exp, bias=False) if self.use_noisy_top_k else None
-    
     def forward(self, x):
-        # optionally run the router in full precision to avoid instability during training
-        # see discussion on pg. 9 here: https://arxiv.org/abs/2101.03961
-        # setting enabled to False in autocast automatically puts everything in float32
-        device_type = 'cuda' if torch.cuda.is_available() else 'cpu' # for later use in torch.autocast
+        """
+        Computes routing information for tokens, including which experts to use,
+        the weights for their outputs, and their position within the expert's batch.
+        This implementation is memory-efficient and avoids quadratic scaling with batch size.
+        """
+        # The router can be sensitive to precision issues, so we can run it in full float32.
+        device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
         ctx = nullcontext() if not self.router_use_full_prec else torch.amp.autocast(device_type=device_type, enabled=False)
 
         with ctx:
-            B, T, _ = x.size()
+            B, T, C = x.size()
             num_tokens = B * T
+            x_flat = x.view(num_tokens, C)
 
-            # eq (4) in (https://arxiv.org/abs/1701.06538)
-            logits = self.w_g(x)  # [B, T, n_exp]
-            if self.use_noisy_top_k:
-                # optionally add noise into the router
-                noise = F.softplus(self.w_noise(x))
+            # 1. GET ROUTING LOGITS
+            # ---------------------
+            logits = self.w_g(x_flat)  # [B*T, n_exp]
+            if self.training and self.use_noisy_top_k:
+                noise = F.softplus(self.w_noise(x_flat))
                 noise *= torch.randn_like(noise)
                 logits += noise
 
-            # router z loss, computed on logits (before softmax)
-            # this loss prevents router logits from becoming too large
-            if self.use_router_z_loss:
-                z_loss = self.compute_router_z_loss(logits)
-                MANAGER.add_router_z_loss(z_loss)
+            # 2. COMPUTE LOSSES (if training)
+            # -------------------------------
+            if self.training:
+                # Router Z-loss prevents logits from growing too large
+                if self.use_router_z_loss:
+                    z_loss = self.compute_router_z_loss(logits.view(B, T, -1))
+                    MANAGER.add_router_z_loss(z_loss)
+                
+                # Find top-k choices for each token
+                top_k_logits, top_k_indices = logits.topk(self.top_k, dim=-1) # [B*T, k]
+                
+                # The auxiliary loss encourages load balancing across experts
+                if self.use_aux_loss:
+                    # To compute aux loss, we need the full probability distribution,
+                    # not just for the top k. We can create this sparsely.
+                    all_probs = torch.zeros_like(logits)
+                    all_probs.scatter_(-1, top_k_indices, F.softmax(top_k_logits, dim=-1))
+                    aux_loss = self.compute_aux_loss(all_probs.view(B, T, -1), top_k_indices.view(B, T, -1))
+                    MANAGER.add_aux_loss(aux_loss)
+            else:
+                 # At inference, we just need the top-k
+                 top_k_logits, top_k_indices = logits.topk(self.top_k, dim=-1)
 
-            # find top k experts for each token
-            top_k_logits, top_k_indices = logits.topk(self.top_k, dim=-1) # [B, T, k]
+            # 3. COMPUTE ROUTER PROBABILITIES
+            # --------------------------------
+            # We normalize the probabilities over the top-k experts
+            router_probs = F.softmax(top_k_logits, dim=-1) # [B*T, k]
 
-            # normalize expert probabilities
-            # Question: should we normalize over all experts or just top-k?
-            # we choose to normalize over top-k, other option is commented out below
-
-            # Shazeer et al (https://arxiv.org/abs/1701.06538) does only topk
-            # see page 4 eq (3)-(5), the code for this is commented out below
-            router_probs = torch.full_like(logits, float('-inf'))  # [B, T, n_exp]
-            router_probs.scatter_(-1, top_k_indices, top_k_logits.to(router_probs.dtype))
-            router_probs = F.softmax(router_probs, dim=-1)
-
-            # # normalize all router logits (not just top-k) via softmax      
-            # router_probs = F.softmax(logits, dim=-1)
-
-            # compute auxiliary load balancing loss
-            # this loss encourages equal probability assigned to each expert
-            # and equal load balancing of tokens assigned to each expert
-            if self.use_aux_loss:
-                aux_loss = self.compute_aux_loss(router_probs, top_k_indices)
-                MANAGER.add_aux_loss(aux_loss)
-
-            # compute expert capacity
+            # 4. DETERMINE TOKEN RANKS WITH CAPACITY LIMITING
+            # -----------------------------------------------
             exp_capacity = self.get_capacity(num_tokens)
+            
+            # Create a one-hot mask of the chosen experts for each token. Shape: [B*T, k, n_exp]
+            expert_mask_one_hot = F.one_hot(top_k_indices, num_classes=self.n_exp)
 
-            # make a multi-hot mask of chosen experts, size [B, T, n_exp]
-            # entries are 0 if expert not chosen and 1 if expert chosen
-            exp_mask = F.one_hot(top_k_indices, num_classes=self.n_exp)  # [B, T, k, n_exp]
-            exp_mask = exp_mask.view(num_tokens, self.top_k, self.n_exp)  # [B * T, k, n_exp]
-            exp_mask = exp_mask.permute(1, 0, 2) # [k, B * T, n_exp]
+            # This is the critical step to ensure load balancing prioritizes top-1 experts.
+            # We flatten the k dimension first, so cumsum processes all top-1 choices, then all top-2, etc.
+            # This is the memory-efficient equivalent of the original logic.
+            reshaped_mask = expert_mask_one_hot.permute(1, 0, 2).reshape(self.top_k * num_tokens, self.n_exp)
+            cumulative_sum = torch.cumsum(reshaped_mask, dim=0)
+            
+            # Reshape back to the original layout
+            position_in_expert = cumulative_sum.reshape(self.top_k, num_tokens, self.n_exp).permute(1, 0, 2)
+            
+            # The rank is the position, but we only care about the rank for the selected expert.
+            # We multiply by the one-hot mask to zero out positions for non-selected experts.
+            rank = (position_in_expert - 1) * expert_mask_one_hot
+            
+            # 5. GENERATE FINAL MASKS AND RANKS FOR THE MOE LAYER
+            # ----------------------------------------------------
+            # Create a mask to drop tokens that exceed the expert's capacity
+            capacity_mask = rank < exp_capacity
 
-            # compute cumulative sum of each token over experts, this stores
-            # the index of each token within the batch of each expert
-            # NOTE: cumsum should count all top-1 first, top-2 second, etc.
-            # so that we prioritize top experts when dropping tokens (this is
-            # done by putting k dimension first for the reshape operation)
-            exp_rank = exp_mask.reshape(self.top_k * num_tokens, self.n_exp)  # [k * B * T, n_exp]
-            exp_rank = torch.cumsum(exp_rank, dim=0) - 1  # cumulative sum of expert selections [k * B * T, n_exp]
-            exp_rank = exp_rank.reshape(self.top_k, num_tokens, self.n_exp)  # [k, B * T, n_exp]
+            # The final expert mask includes both the expert choice and the capacity check.
+            final_expert_mask = expert_mask_one_hot * capacity_mask # [B*T, k, n_exp]
+            
+            # Router probabilities are also masked. If a token is dropped, its probability is zero.
+            # We check if the token was assigned to any expert in its k-th slot.
+            probs_mask = (final_expert_mask.sum(dim=-1) > 0) # [B*T, k]
+            router_probs_masked = router_probs * probs_mask
 
-            # mask out (set to zero) entries that go beyond expert capacity
-            # compute amount of used capacity by taking a sum over mask
-            exp_mask *= torch.lt(exp_rank, exp_capacity) # [k, B * T, n_exp]
-            used_capacity = torch.sum(exp_mask, dim=(0, 1)) # [n_exp]
+            # The final rank is collapsed to a single value per top-k choice
+            final_rank = torch.sum(rank, dim=-1) # [B*T, k]
 
-            # mask rank to only include tokens that are selected
-            # perform a sum so each row only contains index of token
-            # for the expert that is selected in that row
-            # result is a matrix that contains the position of each token
-            # in the batch of its corresponding expert
-            exp_rank = torch.sum(exp_mask * exp_rank, dim=-1)  # [k, B * T]
-
-            # mask probabilities to only include selected experts
-            router_probs = router_probs.view(num_tokens, self.n_exp)[None, :] # [1, B * T, n_exp]
-            exp_weights = exp_mask * router_probs # [k, B * T, n_exp]
-
-            # convert rank into one-hot vectors over the available capacity
-            # stores the position of each token within the capacity of the selected expert
-            exp_rank_sc = F.one_hot(exp_rank, num_classes=exp_capacity) # [k, B * T, exp_capacity]
-
-            # create a vector that stores, for each token, the weight of selected
-            # experts at token's position in the capacity of that expert
-            # size of tensor is [B * T, n_exp, exp_capacity]
-            cb_weight = torch.sum(exp_weights.unsqueeze(3) * exp_rank_sc.unsqueeze(2), dim=0)
-            sec_mask = cb_weight.bool() # binary mask of selected experts for each token
-            return used_capacity, cb_weight, sec_mask
+            # The MOELayer will use these tensors to efficiently dispatch and combine tokens.
+            # Their memory usage all scale linearly with (B * T).
+            return final_expert_mask, router_probs_masked, top_k_indices, final_rank 
     
     def compute_aux_loss(self, expert_probs: torch.Tensor, indices: torch.Tensor):
         """
@@ -290,35 +287,71 @@ class MLPExperts(nn.Module):
 class MOELayer(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.router = Router(config) # (noisy) top k router
-        self.experts = MLPExperts(config) # group of MLPs (experts)
+        self.router = Router(config)
+        self.experts = MLPExperts(config)
+        self.n_exp = config.n_exp
+        self.top_k = config.top_k
 
     def forward(self, x: torch.Tensor):
-        B, T, n_embd = x.size() # track original shape of input
-        num_tokens = (B * T)
+        B, T, C = x.size() # Original shape
+        x = x.view(B * T, C) # Flatten input
 
-        # pass each token through the router
-        used_capacity, exp_weight, exp_mask = self.router(x)
+        # Get routing information from the router
+        expert_mask, router_probs, top_k_indices, rank = self.router(x)
+        # expert_mask: [B*T, k, n_exp] (binary, with capacity limit)
+        # router_probs: [B*T, k] (softmax over k choices)
+        # top_k_indices: [B*T, k] (expert ids)
+        # rank: [B*T, k] (position in expert's batch)
 
-        # flatten out the input
-        x = x.view(num_tokens, n_embd)
-
-        # reshape tokens into batches for each expert
-        # [n_exp, exp_capacity, B * T] * [B * T, n_embd] -> [n_exp, exp_capacity, n_embd]
-        exp_batches = exp_mask.permute(1, 2, 0).type_as(x) @ x
-
-        # compute expert output
-        exp_out = self.experts(exp_batches) # [n_exp, exp_capacity, n_embd]
-
-        # aggregate expert outputs based on router weights
-        # eq (2) on page 4 of ST-MoE (https://arxiv.org/abs/2202.08906)
-        # similar equations are used for other MoE papers
-        exp_weight = exp_weight.view(num_tokens, -1) # [B * T, n_exp * exp_capacity]
-        exp_out = exp_out.view(-1, n_embd) # [n_exp * exp_capacity, n_embd] 
-        output = exp_weight @ exp_out # [B * T, n_embd]
+        # --- Dispatch tokens to experts (the "scatter" part) ---
         
-        # resize output before return
-        return output.view(B, T, n_embd)
+        # Get expert capacity from the router's config
+        exp_capacity = self.router.get_capacity(B * T)
+        
+        # Create an empty buffer for expert inputs
+        expert_inputs = torch.zeros(self.n_exp, exp_capacity, C, dtype=x.dtype, device=x.device)
+
+        # Flatten routing info to iterate over all token-expert assignments
+        flat_expert_mask = expert_mask.sum(dim=1).bool().view(-1) # [B*T * n_exp]
+        flat_top_k_indices = top_k_indices.view(-1) # [B*T * k]
+        flat_rank = rank.view(-1) # [B*T * k]
+        flat_token_indices = torch.arange(B*T, device=x.device).repeat_interleave(self.top_k)
+
+        # Select only the tokens that were assigned to an expert (i.e., not dropped due to capacity)
+        valid_mask = flat_rank < exp_capacity
+        
+        # Get the indices for the valid assignments
+        valid_token_indices = flat_token_indices[valid_mask]
+        valid_expert_indices = flat_top_k_indices[valid_mask]
+        valid_ranks = flat_rank[valid_mask]
+
+        # Use advanced indexing to place tokens into the expert input buffer
+        # This is the memory-efficient equivalent of your large matmul
+        expert_inputs[valid_expert_indices, valid_ranks] = x[valid_token_indices]
+
+        # --- Run experts ---
+        expert_outputs = self.experts(expert_inputs) # [n_exp, exp_capacity, C]
+
+        # --- Combine expert outputs (the "gather" part) ---
+        
+        # Create an empty buffer for the final output
+        output = torch.zeros_like(x) # [B*T, C]
+
+        # Use the same valid indices to retrieve the expert outputs
+        gated_expert_outputs = expert_outputs[valid_expert_indices, valid_ranks]
+
+        # The router probabilities also need to be filtered for valid assignments
+        valid_router_probs = router_probs.view(-1)[valid_mask].unsqueeze(1) # [num_valid, 1]
+
+        # Weight the expert outputs by the router probabilities
+        weighted_outputs = gated_expert_outputs * valid_router_probs
+
+        # Use scatter_add_ to combine outputs for tokens sent to multiple experts (k > 1)
+        # This adds the weighted outputs back to their original token positions
+        output.scatter_add_(0, valid_token_indices.unsqueeze(1).expand_as(weighted_outputs), weighted_outputs)
+
+        # Reshape output to the original input shape
+        return output.view(B, T, C)
 
 class Block(nn.Module):
 
