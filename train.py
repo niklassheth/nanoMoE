@@ -107,7 +107,7 @@ compile = True # use PyTorch 2.0 to compile the model to be faster
 use_profiler = False # enable PyTorch profiler
 profiler_schedule_wait = 2 # number of steps to wait before profiling
 profiler_schedule_warmup = 2 # number of warmup steps
-profiler_schedule_active = 3 # number of active profiling steps
+profiler_schedule_active = 6 # number of active profiling steps
 profiler_schedule_repeat = 1 # number of times to repeat the schedule
 profiler_output_dir = './profiler_results' # directory to save profiler results
 # -----------------------------------------------------------------------------

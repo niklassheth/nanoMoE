@@ -372,8 +372,18 @@ class GPT(nn.Module):
         assert config.block_size is not None
         self.config = config
 
-        # always create normal transformer blocks (MoE disabled for performance testing)
-        blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+        if config.n_exp == 1:
+            # create normal transformer blocks
+            blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+        else:
+            # create transformer blocks, placing an MoE block every <stride> layers
+            blocks = []
+            for i in range(config.n_layer):
+                # TODO: how to implement this?
+                # should we change below to i + 1 ?
+                use_moe = (i % config.stride) == 0
+                blocks.append(Block(config, use_moe=use_moe))
+            blocks = nn.ModuleList(blocks)
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
