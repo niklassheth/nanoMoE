@@ -384,32 +384,34 @@ for epoch in range(max_epochs):
 
         # forward backward update, with optional gradient accumulation to simulate larger batch size
         # and using the GradScaler if data type is float16
-        with record_function("forward_backward"):
-            for micro_step in range(gradient_accumulation_steps):
-                if ddp:
-                    # in DDP training we only need to sync gradients at the last micro step.
-                    # the official way to do this is with model.no_sync() context manager, but
-                    # I really dislike that this bloats the code and forces us to repeat code
-                    # looking at the source of that context manager, it just toggles this variable
-                    model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
-                with ctx:
-                    with record_function("forward"):
-                        logits, loss = model(X, Y)
-                        loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
-                # backward pass, with gradient scaling if training in fp16
-                with record_function("backward"):
-                    scaler.scale(loss).backward()
         
-        with record_function("optimizer_step"):
-            # clip the gradient
-            if grad_clip != 0.0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            # step the optimizer and scaler if training in fp16
-            scaler.step(optimizer)
-            scaler.update()
-            # flush the gradients as soon as we can, no need for this memory anymore
-            optimizer.zero_grad(set_to_none=True)
+        # Handle DDP gradient sync - only sync when we're about to step the optimizer
+        if ddp:
+            model.require_backward_grad_sync = (global_iter % gradient_accumulation_steps == gradient_accumulation_steps - 1)
+        
+        # Forward and backward pass for this batch
+        with record_function("forward_backward"):
+            with ctx:
+                with record_function("forward"):
+                    logits, loss = model(X, Y)
+                    loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
+            
+            # backward pass, with gradient scaling if training in fp16
+            with record_function("backward"):
+                scaler.scale(loss).backward()
+        
+        # Only step optimizer every gradient_accumulation_steps iterations
+        if (global_iter + 1) % gradient_accumulation_steps == 0:
+            with record_function("optimizer_step"):
+                # clip the gradient
+                if grad_clip != 0.0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                # step the optimizer and scaler if training in fp16
+                scaler.step(optimizer)
+                scaler.update()
+                # flush the gradients as soon as we can, no need for this memory anymore
+                optimizer.zero_grad(set_to_none=True)
 
         # timing and logging
         t1 = time.time()
