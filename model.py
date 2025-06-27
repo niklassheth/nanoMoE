@@ -293,65 +293,55 @@ class MOELayer(nn.Module):
         self.top_k = config.top_k
 
     def forward(self, x: torch.Tensor):
-        B, T, C = x.size() # Original shape
-        x = x.view(B * T, C) # Flatten input
+        B, T, C = x.size() # Keep track of original shape
 
-        # Get routing information from the router
+        # --- Get routing information ---
+        # Call the router with the ORIGINAL 3D tensor. The router will handle flattening internally
+        # and return routing info shaped for a flattened list of tokens.
         expert_mask, router_probs, top_k_indices, rank = self.router(x)
-        # expert_mask: [B*T, k, n_exp] (binary, with capacity limit)
-        # router_probs: [B*T, k] (softmax over k choices)
-        # top_k_indices: [B*T, k] (expert ids)
-        # rank: [B*T, k] (position in expert's batch)
+        # expert_mask: [B*T, k, n_exp], router_probs: [B*T, k], etc.
+
+        # Now, flatten the input tensor for the dispatch operation
+        x_flat = x.view(B * T, C)
 
         # --- Dispatch tokens to experts (the "scatter" part) ---
-        
-        # Get expert capacity from the router's config
         exp_capacity = self.router.get_capacity(B * T)
-        
-        # Create an empty buffer for expert inputs
         expert_inputs = torch.zeros(self.n_exp, exp_capacity, C, dtype=x.dtype, device=x.device)
 
-        # Flatten routing info to iterate over all token-expert assignments
-        flat_expert_mask = expert_mask.sum(dim=1).bool().view(-1) # [B*T * n_exp]
-        flat_top_k_indices = top_k_indices.view(-1) # [B*T * k]
-        flat_rank = rank.view(-1) # [B*T * k]
-        flat_token_indices = torch.arange(B*T, device=x.device).repeat_interleave(self.top_k)
+        # Get the indices for the valid assignments that are within capacity
+        flat_top_k_indices = top_k_indices.view(-1)
+        flat_rank = rank.view(-1)
+        flat_token_indices = torch.arange(B * T, device=x.device).repeat_interleave(self.top_k)
 
-        # Select only the tokens that were assigned to an expert (i.e., not dropped due to capacity)
         valid_mask = flat_rank < exp_capacity
-        
-        # Get the indices for the valid assignments
         valid_token_indices = flat_token_indices[valid_mask]
         valid_expert_indices = flat_top_k_indices[valid_mask]
         valid_ranks = flat_rank[valid_mask]
 
-        # Use advanced indexing to place tokens into the expert input buffer
-        # This is the memory-efficient equivalent of your large matmul
-        expert_inputs[valid_expert_indices, valid_ranks] = x[valid_token_indices]
+        # Use advanced indexing to place tokens from the flattened input into the expert buffer
+        expert_inputs[valid_expert_indices, valid_ranks] = x_flat[valid_token_indices]
 
         # --- Run experts ---
         expert_outputs = self.experts(expert_inputs) # [n_exp, exp_capacity, C]
 
         # --- Combine expert outputs (the "gather" part) ---
-        
-        # Create an empty buffer for the final output
-        output = torch.zeros_like(x) # [B*T, C]
+        output_flat = torch.zeros_like(x_flat)
 
-        # Use the same valid indices to retrieve the expert outputs
+        # Retrieve the expert outputs using the same valid indices
         gated_expert_outputs = expert_outputs[valid_expert_indices, valid_ranks]
 
-        # The router probabilities also need to be filtered for valid assignments
-        valid_router_probs = router_probs.view(-1)[valid_mask].unsqueeze(1) # [num_valid, 1]
+        # Filter router probabilities for valid assignments
+        valid_router_probs = router_probs.view(-1)[valid_mask].unsqueeze(1)
 
         # Weight the expert outputs by the router probabilities
         weighted_outputs = gated_expert_outputs * valid_router_probs
 
         # Use scatter_add_ to combine outputs for tokens sent to multiple experts (k > 1)
-        # This adds the weighted outputs back to their original token positions
-        output.scatter_add_(0, valid_token_indices.unsqueeze(1).expand_as(weighted_outputs), weighted_outputs)
+        # This adds the weighted outputs back to their original token positions in the flattened output tensor.
+        output_flat.scatter_add_(0, valid_token_indices.unsqueeze(1).expand_as(weighted_outputs), weighted_outputs)
 
-        # Reshape output to the original input shape
-        return output.view(B, T, C)
+        # Reshape output back to the original input shape
+        return output_flat.view(B, T, C)
 
 class Block(nn.Module):
 
