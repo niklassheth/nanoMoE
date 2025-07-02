@@ -7,86 +7,26 @@ import os
 import torch
 from torch.utils.data import DataLoader, IterableDataset
 from datasets import load_dataset
-import tiktoken
+from transformers import AutoTokenizer
 from multiprocessing import cpu_count
 import numpy as np
 from tqdm import tqdm
 import pickle
 
 
-def clean_text(text: str) -> str:
-    """
-    Clean UTF-8 encoding corruption artifacts, focusing on the most common issues.
-    Replaces corrupted characters with ASCII equivalents where possible.
-    """
-    # Most common corruptions from analysis (1.2M+ total occurrences)
-    corruption_fixes = {
-        'â€œ': '"',    # Left double quotation mark → ASCII quote
-        'â€': '"',     # Right double quotation mark → ASCII quote  
-        'â€™': "'",    # Right single quotation mark/apostrophe → ASCII apostrophe
-        'â€˜': "'",    # Left single quotation mark → ASCII apostrophe
-        'â€¦': '...',  # Horizontal ellipsis → ASCII dots
-        
-        # Additional fixable corruptions from remaining patterns
-        'Ã‰': 'É',     # É with acute
-        'Ã ': 'À',     # À with grave
-        'Ã¨': 'È',     # È with grave
-        'Ã©': 'é',     # é with acute
-        'Ã¡': 'á',     # á with acute
-        'Ã­': 'í',     # í with acute
-        'Ã³': 'ó',     # ó with acute
-        'Ãº': 'ú',     # ú with acute
-        'Ã±': 'ñ',     # ñ with tilde
-        'Ã¼': 'ü',     # ü with diaeresis
-        'Ã¤': 'ä',     # ä with diaeresis
-        'Ã¶': 'ö',     # ö with diaeresis
-        'ÃŸ': 'ß',     # German eszett
-        'Ã§': 'ç',     # ç with cedilla
-        'â"€': '—',    # Em dash
-        'â"': '–',     # En dash
-    }
-    
-    cleaned_text = text
-    for corrupted, clean in corruption_fixes.items():
-        cleaned_text = cleaned_text.replace(corrupted, clean)
-    
-    return cleaned_text
-
-
-def has_unfixable_corruption(text: str) -> bool:
-    """
-    Check if text contains unfixable corruption patterns after cleaning.
-    Only filters out complex multi-byte corruptions that can't be reasonably fixed.
-    """
-    import re
-    
-    # Only filter unfixable corruption patterns
-    unfixable_patterns = [
-        r'Ã¢â‚¬',      # Complex multi-byte quote corruptions
-        r'â∑',         # Mathematical symbols  
-        r'â[^\w\s"€™˜¦"—]',  # â followed by non-standard characters (but allow common punctuation)
-        r'Ã[^\s][^\w\s]',    # Ã followed by non-letter sequences
-    ]
-    
-    for pattern in unfixable_patterns:
-        if re.search(pattern, text):
-            return True
-            
-    return False
 
 
 
 
-def prepare_data(data_dir=None):
+def prepare_data(data_dir=None, tokenizer_repo="niklassheth/tinystories-tokenizer"):
     """
     Download, tokenize, and save TinyStories dataset
     Run with: python dataloader_v2.py
     
     Args:
         data_dir: Directory to save dataset files
+        tokenizer_repo: Hugging Face tokenizer repository name
     """
-    filter_corrupted_accents = True
-    clean_corruption = True
 
     if data_dir is None:
         data_dir = os.path.dirname(__file__)
@@ -94,9 +34,9 @@ def prepare_data(data_dir=None):
     print("Loading TinyStories dataset...")
     dataset = load_dataset("roneneldan/TinyStories")
     
-    # Initialize tokenizer
-    tokenizer = tiktoken.get_encoding("gpt2")
-    eos_token = tokenizer.eot_token  # End of text token
+    # Initialize custom tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_repo)
+    eos_token = tokenizer.eos_token_id  # End of sequence token
     
     def process_split(split_name: str, split_data):
         print(f"Processing {split_name} split...")
@@ -109,23 +49,11 @@ def prepare_data(data_dir=None):
             num_proc=cores
         )
         
-        # Filter out stories with unfixable corruption (after attempting to clean)
-        if filter_corrupted_accents:
-            print("Filtering stories with unfixable corruption...")
-            def is_cleanable(example):
-                # Try cleaning first
-                cleaned = clean_text(example["text"]) if clean_corruption else example["text"]
-                # Only filter if still has unfixable corruption after cleaning
-                return not has_unfixable_corruption(cleaned)
-            
-            filtered = filtered.filter(is_cleanable, num_proc=cores)
         
         # Tokenize each story and track lengths (like openwebtext)
         def tokenize_story(example):
             text = example['text']
-            if clean_corruption:
-                text = clean_text(text)
-            tokens = tokenizer.encode_ordinary(text)
+            tokens = tokenizer.encode(text, add_special_tokens=False)
             tokens.append(eos_token)  # Add EOT after each story
             return {'tokens': tokens, 'len': len(tokens)}
         
@@ -166,7 +94,7 @@ def prepare_data(data_dir=None):
     
     # Save metadata
     meta = {
-        'vocab_size': tokenizer.n_vocab,
+        'vocab_size': len(tokenizer),
         'train_tokens': train_tokens,
         'val_tokens': val_tokens,
         'eot_token': eos_token
@@ -179,7 +107,7 @@ def prepare_data(data_dir=None):
     print(f"✅ Dataset preparation complete!")
     print(f"Train: {train_tokens:,} tokens")
     print(f"Val: {val_tokens:,} tokens")
-    print(f"Vocab size: {tokenizer.n_vocab}")
+    print(f"Vocab size: {len(tokenizer)}")
 
 class ChunkDataset(torch.utils.data.Dataset):
     """
@@ -276,7 +204,7 @@ if __name__ == "__main__":
     )
     
     # Test multiple batches
-    tokenizer = tiktoken.get_encoding("gpt2")
+    tokenizer = AutoTokenizer.from_pretrained("niklassheth/tinystories-tokenizer")
     
     for batch_num, (x, y) in enumerate(train_loader):
         print(f"\nBatch {batch_num + 1}:")
