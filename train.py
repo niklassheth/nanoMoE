@@ -115,6 +115,8 @@ config_keys = [k for k,v in globals().items() if not k.startswith('_') and isins
 # Remove non-existent variables that were removed during epoch-based conversion
 config_keys = [k for k in config_keys if k not in ['max_iters', 'lr_decay_iters', 'eval_interval']]
 exec(open('configurator.py').read()) # overrides from command line or config file
+# OVERRIDE
+min_lr = learning_rate / 10
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 print(config)
 # -----------------------------------------------------------------------------
