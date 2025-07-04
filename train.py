@@ -427,7 +427,7 @@ for epoch in range(max_epochs):
             # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
             lossf = loss.item() * gradient_accumulation_steps
             if global_iter >= 5: # let the training loop settle a bit
-                mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
+                mfu = raw_model.estimate_mfu(batch_size, dt)
                 running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
             
             # Update tqdm progress bar with loss, time, and MFU
