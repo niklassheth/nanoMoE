@@ -641,7 +641,7 @@ class GPT(nn.Module):
         return optimizer
 
     def estimate_mfu(self, fwdbwd_per_iter, dt):
-        """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
+        """ estimate model flops utilization (MFU) in units of GPU bfloat16 -> fp32 accum peak FLOPS """
         # first estimate the number of flops we do per iteration.
         # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
         N = self.get_num_params()
@@ -652,7 +652,26 @@ class GPT(nn.Module):
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
         # express our flops throughput as ratio of A100 bfloat16 peak flops
         flops_achieved = flops_per_iter * (1.0/dt) # per second
-        flops_promised = 312e12 # A100 GPU bfloat16 peak flops is 312 TFLOPS
+        # Determine the theoretical peak FLOPs of the current device using a simple lookup.
+        if torch.cuda.is_available():
+            device_name = torch.cuda.get_device_name(0).lower()
+
+            # Very small lookup table of common GPUs and their BF16/FP16 peak throughput (in FLOPs).
+            # TODO: add more GPUs
+            flops_table = {
+                "3090": 71e12,   # RTX 3090
+                "4090": 165e12,  # RTX 4090
+                "l40s": 362e12,  # L40S
+                "a100": 312e12,  # A100 80GB
+                "h100": 990e12,  # H100
+                "b200": 2250e12,  # B200
+            }
+
+            # Pick the first entry whose key is a substring of the device name; fall back to 0.
+            flops_promised = next((v for k, v in flops_table.items() if k in device_name), 0)
+        else:
+            # If running on CPU or an unknown accelerator, return 0 
+            flops_promised = 0
         mfu = flops_achieved / flops_promised
         return mfu
 
