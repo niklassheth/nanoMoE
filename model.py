@@ -238,17 +238,29 @@ class Router(nn.Module):
         assert capacity > 0
         return int(capacity)
 
+class ReLUSquared(nn.Module):
+    """ReLU-squared activation: computes ReLU(x) then squares the result (x * x)."""
+
+    def __init__(self, inplace: bool = False):
+        super().__init__()
+        self.inplace = inplace
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = F.relu(x, inplace=self.inplace)
+        return x * x
+
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-        self.gelu    = nn.GELU()
+        # Use ReLU-squared activation
+        self.act = ReLUSquared()
         self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
         x = self.c_fc(x)
-        x = self.gelu(x)
+        x = self.act(x)
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
@@ -269,7 +281,8 @@ class MLPExperts(nn.Module):
         self.c_proj = nn.Parameter(torch.empty(config.n_exp, 4 * config.n_embd, config.n_embd))
         self.fc_bias = nn.Parameter(torch.empty(config.n_exp, 1, 4 * config.n_embd)) if self.bias else None
         self.proj_bias = nn.Parameter(torch.empty(config.n_exp, 1, config.n_embd)) if self.bias else None
-        self.gelu = nn.GELU()
+        # Use ReLU-squared activation
+        self.act = ReLUSquared()
         self.dropout = nn.Dropout(config.dropout)
     
 
@@ -277,7 +290,7 @@ class MLPExperts(nn.Module):
         x = torch.bmm(x, self.c_fc)
         if self.bias:
             x += self.fc_bias
-        x = self.gelu(x)
+        x = self.act(x)
         x = torch.bmm(x, self.c_proj)
         if self.bias:
             x += self.proj_bias
