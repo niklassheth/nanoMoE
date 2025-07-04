@@ -348,6 +348,7 @@ for epoch in range(max_epochs):
     
     for batch_idx, (X, Y) in enumerate(pbar):
         global_iter = epoch * iters_per_epoch + batch_idx
+        grad_norm = None  # Initialize gradient norm for logging
         
         # Move to device
         if device_type == 'cuda':
@@ -411,7 +412,8 @@ for epoch in range(max_epochs):
                 # clip the gradient
                 if grad_clip != 0.0:
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                    # Store gradient norm tensor for later logging (avoid .item() sync here)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 # step the optimizer and scaler if training in fp16
                 scaler.step(optimizer)
                 scaler.update()
@@ -426,6 +428,7 @@ for epoch in range(max_epochs):
             # get loss as float. note: this is a CPU-GPU sync point
             # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
             lossf = loss.item() * gradient_accumulation_steps
+            grad_normf = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else None
             if global_iter >= 5: # let the training loop settle a bit
                 mfu = raw_model.estimate_mfu(batch_size, dt)
                 running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
@@ -440,6 +443,7 @@ for epoch in range(max_epochs):
             if wandb_log:
                 wandb.log({
                     "train/loss_step": lossf,
+                    "train/grad_norm": grad_normf,
                     "lr": lr,
                     "mfu": running_mfu*100,
                     "time_ms": dt*1000,
