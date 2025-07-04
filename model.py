@@ -650,7 +650,6 @@ class GPT(nn.Module):
         flops_per_token = 6*N + 12*L*H*Q*T
         flops_per_fwdbwd = flops_per_token * T
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
-        # express our flops throughput as ratio of A100 bfloat16 peak flops
         flops_achieved = flops_per_iter * (1.0/dt) # per second
         # Determine the theoretical peak FLOPs of the current device using a simple lookup.
         if torch.cuda.is_available():
@@ -664,14 +663,15 @@ class GPT(nn.Module):
                 "l40s": 362e12,  # L40S
                 "a100": 312e12,  # A100 80GB
                 "h100": 990e12,  # H100
+                "5070 ti": 176e12,  # RTX 5070 Ti
                 "b200": 2250e12,  # B200
             }
 
             # Pick the first entry whose key is a substring of the device name; fall back to 0.
             flops_promised = next((v for k, v in flops_table.items() if k in device_name), 0)
         else:
-            # If running on CPU or an unknown accelerator, return 0 
-            flops_promised = 0
+            # If running on CPU or an unknown accelerator, return -1 
+            flops_promised = -1
         mfu = flops_achieved / flops_promised
         return mfu
 
