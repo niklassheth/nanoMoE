@@ -305,6 +305,8 @@ def get_lr(it):
 if wandb_log and master_process:
     import wandb
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+    wandb.define_metric("train/*", step_metric="tokens_seen")
+    wandb.define_metric("val/*", step_metric="tokens_seen")
 
 # training loop
 t0 = time.time()
@@ -367,6 +369,7 @@ for epoch in range(max_epochs):
                     "val/loss": val_loss,
                     "lr": lr,
                     "mfu": running_mfu*100, # convert to percentage
+                    "tokens_seen": global_iter * batch_size * block_size,
                 }, step=global_iter)
             if val_loss < best_val_loss or always_save_checkpoint:
                 best_val_loss = val_loss
@@ -440,6 +443,7 @@ for epoch in range(max_epochs):
                     "lr": lr,
                     "mfu": running_mfu*100,
                     "time_ms": dt*1000,
+                    "tokens_seen": global_iter * batch_size * block_size,
                 }, step=global_iter)
         
         # Profiler step
