@@ -39,7 +39,8 @@ for arg in sys.argv[1:]:
                 # if that goes wrong, just use the string
                 attempt = val
             # ensure the types match ok
-            assert type(attempt) == type(globals()[key])
+            # remove check for wandb sweeps
+            # assert type(attempt) == type(globals()[key])
             # cross fingers
             print(f"Overriding: {key} = {attempt}")
             globals()[key] = attempt
