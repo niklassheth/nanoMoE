@@ -31,8 +31,10 @@ class CausalSelfAttention(nn.Module):
         # regularization
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
-        self.q_norm = nn.RMSNorm(config.n_embd, eps=1e-6, elementwise_affine=True)
-        self.k_norm = nn.RMSNorm(config.n_embd, eps=1e-6, elementwise_affine=True)
+
+        self.head_dim = config.n_embd // config.n_head
+        self.q_norm = nn.RMSNorm(self.head_dim, eps=1e-6, elementwise_affine=True)
+        self.k_norm = nn.RMSNorm(self.head_dim, eps=1e-6, elementwise_affine=True)
         
         self.n_head = config.n_head
         self.n_embd = config.n_embd
@@ -44,12 +46,13 @@ class CausalSelfAttention(nn.Module):
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
 
+        # split into heads first …
+        k = k.view(B, T, self.n_head, self.head_dim).transpose(1, 2)  # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        # … then normalise each (token, head) vector
         q = self.q_norm(q)
         k = self.k_norm(k)
-
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True, scale=1.0)
