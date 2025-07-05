@@ -89,6 +89,7 @@ grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 # epoch-based training
 max_epochs = 1 # number of epochs to train
 evals_per_epoch = 10 # number of evaluations per epoch
+stop_epoch = 999 # stop training after this many epochs (set high by default to not interfere)
 
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
@@ -453,6 +454,11 @@ for epoch in range(max_epochs):
         # Profiler step
         if profiler is not None:
             profiler.step()
+
+    # Check if we should stop training
+    if epoch + 1 >= stop_epoch:
+        print(f"Stopping training after {epoch + 1} epochs")
+        break
 
 # Stop profiler if it was started
 if profiler is not None:
