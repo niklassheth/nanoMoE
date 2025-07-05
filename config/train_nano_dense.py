@@ -33,5 +33,5 @@ log_interval = 50 # slow as balls
 
 # weight decay
 weight_decay = 1e-1
-learning_rate = 6e-3
+learning_rate = 1.1e-3
 grad_clip = 1.0
