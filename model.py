@@ -31,6 +31,7 @@ class CausalSelfAttention(nn.Module):
         # regularization
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
+        
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
@@ -47,6 +48,7 @@ class CausalSelfAttention(nn.Module):
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
+
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
@@ -350,9 +352,9 @@ class Block(nn.Module):
 
     def __init__(self, config, use_moe=False):
         super().__init__()
-        self.ln_1 = nn.RMSNorm(config.n_embd, elementwise_affine=config.bias)
+        self.ln_1 = nn.RMSNorm(config.n_embd, elementwise_affine=True)
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = nn.RMSNorm(config.n_embd, elementwise_affine=config.bias)
+        self.ln_2 = nn.RMSNorm(config.n_embd, elementwise_affine=True)
         if use_moe:
             self.mlp = MOELayer(config)
         else:
@@ -416,7 +418,7 @@ class GPT(nn.Module):
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
             h = blocks,
-            ln_f = nn.RMSNorm(config.n_embd, elementwise_affine=config.bias),
+            ln_f = nn.RMSNorm(config.n_embd, elementwise_affine=True),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
