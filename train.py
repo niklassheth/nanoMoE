@@ -87,14 +87,13 @@ beta2 = 0.95
 grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 
 # epoch-based training
-max_epochs = 1 # number of epochs to train
-evals_per_epoch = 10 # number of evaluations per epoch
-stop_epoch = 999 # stop training after this many epochs (set high by default to not interfere)
+num_epochs = 1.0  # total number of epochs to train (can be fractional)
+evals_per_epoch = 10  # number of evaluations per epoch
+warmup_frac = 0.01  # fraction of total steps used for warmup
+decay_frac = 0.1    # fraction of total steps used for final decay
 
-# learning rate decay settings
-decay_lr = True # whether to decay the learning rate
-warmup_iters = 2000 # how many steps to warm up for
-min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+# learning rate schedule
+decay_lr = True  # whether to use the warmup/stable/decay schedule
 
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
@@ -116,9 +115,7 @@ config_keys = [k for k,v in globals().items() if not k.startswith('_') and isins
 # Remove non-existent variables that were removed during epoch-based conversion
 config_keys = [k for k in config_keys if k not in ['max_iters', 'lr_decay_iters', 'eval_interval']]
 exec(open('configurator.py').read()) # overrides from command line or config file
-# OVERRIDE
-min_lr = learning_rate / 10
-config = {k: globals()[k] for k in config_keys} # will be useful for logging
+config = {k: globals()[k] for k in config_keys}  # will be useful for logging
 print(config)
 # -----------------------------------------------------------------------------
 
@@ -179,8 +176,10 @@ val_loader = get_dataloader(
 
 # Calculate epoch parameters
 iters_per_epoch = len(train_loader)
-total_iters = max_epochs * iters_per_epoch
-lr_decay_iters = total_iters  # decay over entire training
+total_iters = int(num_epochs * iters_per_epoch)
+warmup_iters = int(warmup_frac * total_iters)
+decay_iters = int(decay_frac * total_iters)
+decay_start = total_iters - decay_iters
 eval_every_n_iters = max(1, iters_per_epoch // evals_per_epoch)
 
 tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * block_size
@@ -188,8 +187,10 @@ tokens_per_epoch = tokens_per_iter * iters_per_epoch
 
 print(f"Epoch configuration:")
 print(f"  Iterations per epoch: {iters_per_epoch}")
-print(f"  Total epochs: {max_epochs}")
+print(f"  Num epochs: {num_epochs}")
 print(f"  Total iterations: {total_iters}")
+print(f"  Warmup iters: {warmup_iters}")
+print(f"  Decay iters: {decay_iters}")
 print(f"  Evaluations per epoch: {evals_per_epoch}")
 print(f"  Evaluate every {eval_every_n_iters} iterations")
 print(f"  Tokens per iteration: {tokens_per_iter:,}")
@@ -288,19 +289,17 @@ def estimate_loss():
     model.train()
     return val_losses.mean()
 
-# learning rate decay scheduler (cosine with warmup)
-def get_lr(it):
-    # 1) linear warmup for warmup_iters steps
+# learning rate scheduler (warmup -> stable -> decay to zero)
+def get_lr(it: int) -> float:
+    """Compute learning rate at iteration it."""
     if it < warmup_iters:
-        return learning_rate * (it + 1) / (warmup_iters + 1)
-    # 2) if it > lr_decay_iters, return min learning rate
-    if it > lr_decay_iters:
-        return min_lr
-    # 3) in between, use cosine decay down to min learning rate
-    decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
-    assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
-    return min_lr + coeff * (learning_rate - min_lr)
+        return learning_rate * (it + 1) / float(warmup_iters + 1)
+    if it < decay_start:
+        return learning_rate
+    if it >= total_iters:
+        return 0.0
+    decay_ratio = (it - decay_start) / float(max(1, decay_iters))
+    return learning_rate * (1 - math.sqrt(decay_ratio))
 
 # logging
 if wandb_log and master_process:
@@ -340,15 +339,17 @@ if use_profiler and master_process:
     )
     profiler.start()
 
-for epoch in range(max_epochs):
+global_iter = 0
+for epoch in range(math.ceil(num_epochs)):
     if master_process:
-        print(f"\n=== Epoch {epoch + 1}/{max_epochs} ===")
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{max_epochs}", unit="batch")
+        print(f"\n=== Epoch {epoch + 1}/{num_epochs} ===")
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}", unit="batch")
     else:
         pbar = train_loader
     
     for batch_idx, (X, Y) in enumerate(pbar):
-        global_iter = epoch * iters_per_epoch + batch_idx
+        if global_iter >= total_iters:
+            break
         grad_norm = None  # Initialize gradient norm for logging
         
         # Move to device
@@ -455,9 +456,9 @@ for epoch in range(max_epochs):
         if profiler is not None:
             profiler.step()
 
-    # Check if we should stop training
-    if epoch + 1 >= stop_epoch:
-        print(f"Stopping training after {epoch + 1} epochs")
+        global_iter += 1
+
+    if global_iter >= total_iters:
         break
 
 # Stop profiler if it was started
