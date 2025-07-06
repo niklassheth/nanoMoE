@@ -367,6 +367,20 @@ for epoch in range(math.ceil(num_epochs)):
         if global_iter > 0 and global_iter % eval_every_n_iters == 0 and master_process:
             val_loss = estimate_loss()
             print(f"epoch {epoch + 1}, step {global_iter}: val loss {val_loss:.4f}")
+            
+            # Debug: Print alpha statistics from a random LearnableReLU module
+            learnable_relu_modules = [(name, module) for name, module in raw_model.named_modules() 
+                                    if hasattr(module, 'alpha') and hasattr(module, 'forward')]
+            if learnable_relu_modules:
+                import random
+                name, module = random.choice(learnable_relu_modules)
+                alpha_vals = module.alpha.data
+                alpha_min = alpha_vals.min().item()
+                alpha_mean = alpha_vals.mean().item()
+                alpha_max = alpha_vals.max().item()
+                alpha_std = alpha_vals.std().item()
+                print(f"  {name} alpha - min: {alpha_min:.3f}, mean: {alpha_mean:.3f}, max: {alpha_max:.3f}, std: {alpha_std:.3f}")
+            
             if wandb_log:
                 wandb.log({
                     "val/loss": val_loss,
