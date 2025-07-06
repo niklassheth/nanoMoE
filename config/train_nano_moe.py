@@ -35,8 +35,10 @@ block_size = 512
 gradient_accumulation_steps = 2
 
 # epoch-based training
-max_epochs = 1
+num_epochs = 1.0
 evals_per_epoch = 50
+warmup_frac = 0.01
+decay_frac = 0.1
 
 # eval stuff
 eval_iters = 200
