@@ -223,23 +223,24 @@ class Router(nn.Module):
         assert capacity > 0
         return int(capacity)
 
-class ReLUSquared(nn.Module):
-    """ReLU-squared activation: computes ReLU(x) then squares the result (x * x)."""
+class LearnableReLU(nn.Module):
+    """ReLU with learnable exponent: computes ReLU(x)^alpha where alpha is learnable per feature."""
 
-    def __init__(self, inplace: bool = False):
+    def __init__(self, num_features: int, alpha: float = 2.0, inplace: bool = False):
         super().__init__()
+        self.alpha = nn.Parameter(torch.full((num_features,), alpha))
         self.inplace = inplace
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.relu(x, inplace=self.inplace)
-        return x * x
+        return torch.pow(x, self.alpha)
 
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-        # Use ReLU-squared activation
-        self.act = ReLUSquared()
+        # Use learnable ReLU activation
+        self.act = LearnableReLU(4 * config.n_embd)
         self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
@@ -266,8 +267,8 @@ class MLPExperts(nn.Module):
         self.c_proj = nn.Parameter(torch.empty(config.n_exp, 4 * config.n_embd, config.n_embd))
         self.fc_bias = nn.Parameter(torch.empty(config.n_exp, 1, 4 * config.n_embd)) if self.bias else None
         self.proj_bias = nn.Parameter(torch.empty(config.n_exp, 1, config.n_embd)) if self.bias else None
-        # Use ReLU-squared activation
-        self.act = ReLUSquared()
+        # Use learnable ReLU activation
+        self.act = LearnableReLU(4 * config.n_embd)
         self.dropout = nn.Dropout(config.dropout)
     
 
@@ -504,6 +505,9 @@ class GPT(nn.Module):
             if module.fc_bias is not None:
                 torch.nn.init.zeros_(module.fc_bias)
                 torch.nn.init.zeros_(module.proj_bias)
+        elif isinstance(module, LearnableReLU):
+            # Initialize alpha parameters with small variance around 2.0 to break symmetry
+            torch.nn.init.normal_(module.alpha, mean=2.0, std=0.1)
         elif isinstance(module, nn.Embedding):
             # just use standard initialization scheme for embedding always
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
