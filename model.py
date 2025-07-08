@@ -17,7 +17,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 from manager import MANAGER
-from muon import MuonWithAuxAdam
+from muon import SingleDeviceMuonWithAuxAdam
 
 
 class CausalSelfAttention(nn.Module):
@@ -640,7 +640,7 @@ class GPT(nn.Module):
         print(f"  Hidden gains/biases (Adam): {len(hidden_gains_biases)} tensors, {num_hidden_gains_biases:,} parameters")
         print(f"  Non-hidden params (Adam): {len(nonhidden_params)} tensors, {num_nonhidden_params:,} parameters")
         
-        optimizer = MuonWithAuxAdam(param_groups)
+        optimizer = SingleDeviceMuonWithAuxAdam(param_groups, device_type)
         print(f"using Muon optimizer")
 
         return optimizer
