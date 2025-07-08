@@ -335,9 +335,9 @@ class Block(nn.Module):
 
     def __init__(self, config, use_moe=False):
         super().__init__()
-        self.ln_1 = nn.RMSNorm(config.n_embd, eps=1e-6, elementwise_affine=True)
+        self.ln_1 = nn.RMSNorm(config.n_embd, eps=1e-6, elementwise_affine=False)
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = nn.RMSNorm(config.n_embd, eps=1e-6, elementwise_affine=True)
+        self.ln_2 = nn.RMSNorm(config.n_embd, eps=1e-6, elementwise_affine=False)
         if use_moe:
             self.mlp = MOELayer(config)
         else:
@@ -399,7 +399,7 @@ class GPT(nn.Module):
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             h = blocks,
-            ln_f = nn.RMSNorm(config.n_embd, eps=1e-6, elementwise_affine=True),
+            ln_f = nn.RMSNorm(config.n_embd, eps=1e-6, elementwise_affine=False),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
