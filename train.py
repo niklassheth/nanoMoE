@@ -411,11 +411,11 @@ for epoch in range(math.ceil(num_epochs)):
         # Only step optimizer every gradient_accumulation_steps iterations
         if (global_iter + 1) % gradient_accumulation_steps == 0:
             with record_function("optimizer_step"):
-                # clip the gradient
-                if grad_clip != 0.0:
-                    scaler.unscale_(optimizer)
-                    # Store gradient norm tensor for later logging (avoid .item() sync here)
-                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                # disable gradient clipping for now
+                #if grad_clip != 0.0:
+                #    scaler.unscale_(optimizer)
+                #    # Store gradient norm tensor for later logging (avoid .item() sync here)
+                #    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 # step the optimizer and scaler if training in fp16
                 scaler.step(optimizer)
                 scaler.update()
