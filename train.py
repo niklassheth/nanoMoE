@@ -312,6 +312,7 @@ if wandb_log and master_process:
 t0 = time.time()
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
+running_tokens_per_sec = -1.0  # EMA of tokens processed per second
 
 # Initialize profiler if enabled
 profiler = None
@@ -431,14 +432,17 @@ for epoch in range(math.ceil(num_epochs)):
             # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
             lossf = loss.item() * gradient_accumulation_steps
             grad_normf = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else None
+            # compute tokens per second for this iteration and update EMA
+            tokens_ps = (batch_size * block_size) / dt if dt > 0 else 0.0
+            running_tokens_per_sec = tokens_ps if running_tokens_per_sec == -1.0 else 0.9 * running_tokens_per_sec + 0.1 * tokens_ps
             if global_iter >= 5: # let the training loop settle a bit
                 mfu = raw_model.estimate_mfu(batch_size, dt)
                 running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
             
-            # Update tqdm progress bar with loss, time, and MFU
+            # Update tqdm progress bar with loss, tok/s, and MFU
             pbar.set_postfix({
                 'loss': f'{lossf:.4f}',
-                'time': f'{dt*1000:.2f}ms',
+                'tok/s': tqdm.format_sizeof(running_tokens_per_sec, divisor=1000),
                 'mfu': f'{running_mfu*100:.2f}%'
             })
             
@@ -448,6 +452,7 @@ for epoch in range(math.ceil(num_epochs)):
                     "train/grad_norm": grad_normf,
                     "lr": lr,
                     "mfu": running_mfu*100,
+                    "tok_per_sec": running_tokens_per_sec,
                     "time_ms": dt*1000,
                     "tokens_seen": global_iter * batch_size * block_size,
                 }, step=global_iter)
