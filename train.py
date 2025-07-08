@@ -60,7 +60,6 @@ block_size = 1024
 n_layer = 12
 n_head = 12
 n_embd = 768
-dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 
 # moe
@@ -212,7 +211,7 @@ if os.path.exists(meta_path):
 
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
-                  bias=bias, vocab_size=None, dropout=dropout, n_exp=n_exp, top_k=top_k,
+                  bias=bias, vocab_size=None, n_exp=n_exp, top_k=top_k,
                   use_aux_loss=use_aux_loss, use_router_z_loss=use_router_z_loss,
                   use_noisy_top_k=use_noisy_top_k, aux_loss_weight=aux_loss_weight,
                   router_z_loss_weight=router_z_loss_weight, train_capacity=train_capacity,
@@ -234,7 +233,7 @@ if init_from == 'scratch':
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     # initialize from OpenAI GPT-2 weights
-    override_args = dict(dropout=dropout)
+    override_args = dict()
     model = GPT.from_pretrained(init_from, override_args)
     # read off the created config params, so we can store them into checkpoint correctly
     for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:

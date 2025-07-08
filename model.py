@@ -28,15 +28,10 @@ class CausalSelfAttention(nn.Module):
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        # regularization
-        self.attn_dropout = nn.Dropout(config.dropout)
-        self.resid_dropout = nn.Dropout(config.dropout)
-
         self.head_dim = config.n_embd // config.n_head
         
         self.n_head = config.n_head
         self.n_embd = config.n_embd
-        self.dropout = config.dropout
     
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
@@ -54,12 +49,12 @@ class CausalSelfAttention(nn.Module):
         k = F.rms_norm(k, (self.head_dim,))
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+        y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, is_causal=True)
 
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
         # output projection
-        y = self.resid_dropout(self.c_proj(y))
+        y = self.c_proj(y)
         return y
 
 class Router(nn.Module):
@@ -240,13 +235,11 @@ class MLP(nn.Module):
         # Use ReLU-squared activation
         self.act = ReLUSquared()
         self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
-        self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
         x = self.c_fc(x)
         x = self.act(x)
         x = self.c_proj(x)
-        x = self.dropout(x)
         return x
 
 class MLPExperts(nn.Module):
@@ -267,7 +260,6 @@ class MLPExperts(nn.Module):
         self.proj_bias = nn.Parameter(torch.empty(config.n_exp, 1, config.n_embd)) if self.bias else None
         # Use ReLU-squared activation
         self.act = ReLUSquared()
-        self.dropout = nn.Dropout(config.dropout)
     
 
     def forward(self, x):
@@ -278,7 +270,6 @@ class MLPExperts(nn.Module):
         x = torch.bmm(x, self.c_proj)
         if self.bias:
             x += self.proj_bias
-        x = self.dropout(x)
         return x
 
 class MOELayer(nn.Module):
@@ -364,7 +355,6 @@ class GPTConfig:
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
-    dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
 
     # MoE-related configs 
@@ -408,7 +398,6 @@ class GPT(nn.Module):
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
-            drop = nn.Dropout(config.dropout),
             h = blocks,
             ln_f = nn.RMSNorm(config.n_embd, eps=1e-6, elementwise_affine=True),
         ))
@@ -516,7 +505,7 @@ class GPT(nn.Module):
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
+        x = tok_emb + pos_emb
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
@@ -556,8 +545,8 @@ class GPT(nn.Module):
         assert not 'moe' in model_type, "Pretrained checkpoints not available for MoE"
         assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
         override_args = override_args or {} # default to empty dict
-        # only dropout can be overridden see more notes below
-        assert all(k == 'dropout' for k in override_args)
+        # no overrides supported for pretrained models
+        assert len(override_args) == 0
         from transformers import GPT2LMHeadModel
         print("loading weights from pretrained gpt: %s" % model_type)
 
@@ -572,10 +561,7 @@ class GPT(nn.Module):
         config_args['vocab_size'] = 50257 # always 50257 for GPT model checkpoints
         config_args['block_size'] = 1024 # always 1024 for GPT model checkpoints
         config_args['bias'] = True # always True for GPT model checkpoints
-        # we can override the dropout rate, if desired
-        if 'dropout' in override_args:
-            print(f"overriding dropout rate to {override_args['dropout']}")
-            config_args['dropout'] = override_args['dropout']
+        # no overrides supported for pretrained models
         # create a from-scratch initialized minGPT model
         config = GPTConfig(**config_args)
         model = GPT(config)
