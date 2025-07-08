@@ -17,6 +17,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 from manager import MANAGER
+from muon import MuonWithAuxAdam
 
 
 class CausalSelfAttention(nn.Module):
@@ -595,31 +596,52 @@ class GPT(nn.Module):
 
         return model
 
-    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
-        # TODO: add expert config
+    def configure_optimizers(self, weight_decay, betas, device_type, adam_lr, muon_lr):
         # start with all of the candidate parameters
         param_dict = {pn: p for pn, p in self.named_parameters()}
         # filter out those that do not require grad
         param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
-        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
-        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
-        # add an extra check for "bias" string to account for bias terms in MoE layers
-        decay_params = [p for n, p in param_dict.items() if (p.dim() >= 2 and not n.endswith('bias'))]
-        nodecay_params = [p for n, p in param_dict.items() if (p.dim() < 2 or n.endswith('bias'))]
-        optim_groups = [
-            {'params': decay_params, 'weight_decay': weight_decay},
-            {'params': nodecay_params, 'weight_decay': 0.0}
+        
+        # Classify parameters for Muon optimizer
+        # 1. Hidden weights (2D params except lm_head) - use Muon
+        # 2. Hidden gains/biases (1D params and biases) - use Adam
+        # 3. Non-hidden params (lm_head only) - use Adam
+        
+        hidden_weights = []
+        hidden_gains_biases = []
+        nonhidden_params = []
+        
+        for name, param in param_dict.items():
+            if name == 'lm_head.weight':
+                # Language model head goes to non-hidden (Adam)
+                nonhidden_params.append(param)
+            elif param.dim() >= 2 and not name.endswith('bias'):
+                # All other 2D params are hidden weights (Muon)
+                hidden_weights.append(param)
+            else:
+                # 1D params and biases are hidden gains/biases (Adam)
+                hidden_gains_biases.append(param)
+        
+        # Create parameter groups for Muon
+        param_groups = [
+            dict(params=hidden_weights, use_muon=True,
+                 lr=muon_lr, weight_decay=0.01),
+            dict(params=hidden_gains_biases + nonhidden_params, use_muon=False,
+                 lr=adam_lr, betas=betas, weight_decay=0.01),
         ]
-        num_decay_params = sum(p.numel() for p in decay_params)
-        num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
-        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
-        # Create AdamW optimizer and use the fused version if it is available
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == 'cuda'
-        extra_args = dict(fused=True) if use_fused else dict()
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
-        print(f"using fused AdamW: {use_fused}")
+        
+        # Debug prints
+        num_hidden_weights = sum(p.numel() for p in hidden_weights)
+        num_hidden_gains_biases = sum(p.numel() for p in hidden_gains_biases)
+        num_nonhidden_params = sum(p.numel() for p in nonhidden_params)
+        
+        print(f"Muon parameter groups:")
+        print(f"  Hidden weights (Muon): {len(hidden_weights)} tensors, {num_hidden_weights:,} parameters")
+        print(f"  Hidden gains/biases (Adam): {len(hidden_gains_biases)} tensors, {num_hidden_gains_biases:,} parameters")
+        print(f"  Non-hidden params (Adam): {len(nonhidden_params)} tensors, {num_nonhidden_params:,} parameters")
+        
+        optimizer = MuonWithAuxAdam(param_groups)
+        print(f"using Muon optimizer")
 
         return optimizer
 

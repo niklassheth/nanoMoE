@@ -35,5 +35,8 @@ log_interval = 50 # slow as balls
 
 # weight decay
 weight_decay = 1e-1
-learning_rate = 1.1e-3
+
+# muon optimizer learning rates
+adam_lr = 1.1e-3 # learning rate for Adam params (gains/biases + non-hidden)
+muon_lr = 1.1e-3 * 67 # learning rate for Muon params (hidden weights)
 #grad_clip = 1.0

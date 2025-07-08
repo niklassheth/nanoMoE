@@ -79,11 +79,14 @@ switch_tfm_init_scale = 1.0  # recommended 0.1 for stability (pg.10, https://arx
 router_use_full_prec = False
 
 # adamw optimizer
-learning_rate = 6e-4 # max learning rate
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
 grad_clip = 0.0 # clip gradients at this value, or disable if == 0.0
+
+# muon optimizer learning rates
+adam_lr = 6e-4 # learning rate for Adam params (gains/biases + non-hidden)
+muon_lr = 6e-4 * 67 # learning rate for Muon params (hidden weights)
 
 # epoch-based training
 num_epochs = 1.0  # total number of epochs to train (can be fractional)
@@ -248,7 +251,7 @@ model.to(device)
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # optimizer
-optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
+optimizer = model.configure_optimizers(weight_decay, (beta1, beta2), device_type, adam_lr, muon_lr)
 
 # compile the model
 if compile:
@@ -290,15 +293,15 @@ def estimate_loss():
 
 # learning rate scheduler (warmup -> stable -> decay to zero)
 def get_lr(it: int) -> float:
-    """Compute learning rate at iteration it."""
+    """Compute learning rate multiplier at iteration it."""
     if it < warmup_iters:
-        return learning_rate * (it + 1) / float(warmup_iters + 1)
+        return (it + 1) / float(warmup_iters + 1)
     if it < decay_start:
-        return learning_rate
+        return 1.0
     if it >= total_iters:
         return 0.0
     decay_ratio = (it - decay_start) / float(max(1, decay_iters))
-    return learning_rate * (1 - math.sqrt(decay_ratio))
+    return (1 - math.sqrt(decay_ratio))
 
 # logging
 if wandb_log and master_process:
@@ -359,9 +362,12 @@ for epoch in range(math.ceil(num_epochs)):
             X, Y = X.to(device), Y.to(device)
 
         # determine and set the learning rate for this iteration
-        lr = get_lr(global_iter) if decay_lr else learning_rate
+        lr_multiplier = get_lr(global_iter) if decay_lr else 1.0
         for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
+            if param_group['use_muon']:
+                param_group['lr'] = muon_lr * lr_multiplier
+            else:
+                param_group['lr'] = adam_lr * lr_multiplier
 
         # evaluate the loss on train/val sets and write checkpoints
         if global_iter > 0 and global_iter % eval_every_n_iters == 0 and master_process:
@@ -370,7 +376,7 @@ for epoch in range(math.ceil(num_epochs)):
             if wandb_log:
                 wandb.log({
                     "val/loss": val_loss,
-                    "lr": lr,
+                    "lr": adam_lr * lr_multiplier,  # log Adam LR as representative
                     "mfu": running_mfu*100, # convert to percentage
                     "tokens_seen": global_iter * batch_size * block_size,
                 }, step=global_iter)
@@ -451,7 +457,8 @@ for epoch in range(math.ceil(num_epochs)):
                 wandb.log({
                     "train/loss_step": lossf,
                     "train/grad_norm": grad_normf,
-                    "lr": lr,
+                    "lr": adam_lr * lr_multiplier,  # log Adam LR as representative
+                    "muon_lr": muon_lr * lr_multiplier,  # also log Muon LR
                     "mfu": running_mfu*100,
                     "tok_per_sec": running_tokens_per_sec,
                     "time_ms": dt*1000,

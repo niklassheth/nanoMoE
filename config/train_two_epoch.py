@@ -33,4 +33,7 @@ log_interval = 50
 
 # optimizer settings
 weight_decay = 0.1
-learning_rate = 0.0007152454333036531
+
+# muon optimizer learning rates
+adam_lr = 0.0007152454333036531 # learning rate for Adam params (gains/biases + non-hidden)
+muon_lr = 0.0007152454333036531 * 67 # learning rate for Muon params (hidden weights)
