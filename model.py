@@ -50,8 +50,8 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
 
         # QK norm
-        q = F.rms_norm(q, self.head_dim)
-        k = F.rms_norm(k, self.head_dim)
+        q = F.rms_norm(q, (self.head_dim,))
+        k = F.rms_norm(k, (self.head_dim,))
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
