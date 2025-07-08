@@ -84,7 +84,7 @@ learning_rate = 6e-4 # max learning rate
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
-grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
+grad_clip = 0.0 # clip gradients at this value, or disable if == 0.0
 
 # epoch-based training
 num_epochs = 1.0  # total number of epochs to train (can be fractional)
