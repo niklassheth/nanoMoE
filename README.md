@@ -18,7 +18,7 @@ Because the code is so simple, it is very easy to hack to your needs, train new 
 ## install
 
 ```
-pip install torch numpy transformers datasets tiktoken wandb tqdm
+uv pip install torch numpy transformers datasets tokenizers wandb tqdm
 ```
 
 Dependencies:
