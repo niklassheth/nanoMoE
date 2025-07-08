@@ -612,8 +612,8 @@ class GPT(nn.Module):
         nonhidden_params = []
         
         for name, param in param_dict.items():
-            if name == 'lm_head.weight':
-                # Language model head goes to non-hidden (Adam)
+            if name in ['lm_head.weight', 'transformer.wte.weight', 'transformer.wpe.weight']:
+                # Language model head, token embeddings, position embeddings go to non-hidden (Adam)
                 nonhidden_params.append(param)
             elif param.dim() >= 2 and not name.endswith('bias'):
                 # All other 2D params are hidden weights (Muon)
