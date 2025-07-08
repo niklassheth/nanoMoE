@@ -35,11 +35,16 @@ class CausalSelfAttention(nn.Module):
         self.head_dim = config.n_embd // config.n_head
         #self.q_norm = nn.RMSNorm(self.head_dim, eps=1e-6, elementwise_affine=False)
         #self.k_norm = nn.RMSNorm(self.head_dim, eps=1e-6, elementwise_affine=False)
+
+        self.g = nn.Parameter(torch.tensor(8.0, dtype=torch.float32))
         
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
 
+    def _l2_normalize(self, x, eps=1e-6):
+        return x / (x.norm(dim=-1, keepdim=True) + eps)
+    
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
@@ -50,12 +55,14 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, self.head_dim).transpose(1, 2)  # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
 
-        q, k = F.rms_norm(q, (q.size(-1),)), F.rms_norm(k, (k.size(-1),)) # QK norm
+        q, k = self._l2_normalize(q), self._l2_normalize(k) # QK norm
+        
+        q = q * self.g.to(q.dtype) # learnable scale factor
 
         v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+        y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True, scale=1.0)
 
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
