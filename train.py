@@ -432,10 +432,12 @@ for epoch in range(math.ceil(num_epochs)):
             # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
             lossf = loss.item() * gradient_accumulation_steps
             grad_normf = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else None
-            # compute tokens per second for this iteration and update EMA
+            # compute tokens per second for this iteration (raw)
             tokens_ps = (batch_size * block_size) / dt if dt > 0 else 0.0
-            running_tokens_per_sec = tokens_ps if running_tokens_per_sec == -1.0 else 0.9 * running_tokens_per_sec + 0.1 * tokens_ps
-            if global_iter >= 5: # let the training loop settle a bit
+
+            # update running averages once the loop has warmed up a few iterations (parallels MFU logic)
+            if global_iter >= 5:  # let the training loop settle a bit before smoothing
+                running_tokens_per_sec = tokens_ps if running_tokens_per_sec == -1.0 else 0.9 * running_tokens_per_sec + 0.1 * tokens_ps
                 mfu = raw_model.estimate_mfu(batch_size, dt)
                 running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
             
