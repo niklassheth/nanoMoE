@@ -14,7 +14,7 @@ stride = 100 #disable moe
 
 # use smaller GPT model
 n_layer = 8
-n_head = 8
+n_head = 4 # 128 head size works better with qknorm (?)
 n_embd = 512
 
 # these make the total batch size be ~0.5M
