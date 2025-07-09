@@ -94,8 +94,6 @@ evals_per_epoch = 10  # number of evaluations per epoch
 warmup_frac = 0.01  # fraction of total steps used for warmup
 decay_frac = 0.1    # fraction of total steps used for final decay
 
-# learning rate schedule
-decay_lr = True  # whether to use the warmup/stable/decay schedule
 
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
@@ -115,7 +113,7 @@ profiler_output_dir = './profiler_results' # directory to save profiler results
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 # Remove non-existent variables that were removed during epoch-based conversion
-config_keys = [k for k in config_keys if k not in ['max_iters', 'lr_decay_iters', 'eval_interval']]
+config_keys = [k for k in config_keys if k not in ['max_iters', 'lr_decay_iters', 'eval_interval', 'decay_lr']]
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys}  # will be useful for logging
 print(config)
@@ -292,16 +290,26 @@ def estimate_loss():
     return val_losses.mean()
 
 # learning rate scheduler (warmup -> stable -> decay to zero)
-def get_lr(it: int) -> float:
+def get_lr(it: int, optimizer_type: str = 'adam') -> float:
     """Compute learning rate multiplier at iteration it."""
-    if it < warmup_iters:
-        return (it + 1) / float(warmup_iters + 1)
-    if it < decay_start:
-        return 1.0
-    if it >= total_iters:
-        return 0.0
-    decay_ratio = (it - decay_start) / float(max(1, decay_iters))
-    return (1 - math.sqrt(decay_ratio))
+    if optimizer_type == 'muon':
+        # Muon skips warmup - start at 1.0, then follow stable-decay schedule
+        if it < decay_start:
+            return 1.0
+        if it >= total_iters:
+            return 0.0
+        decay_ratio = (it - decay_start) / float(max(1, decay_iters))
+        return (1 - math.sqrt(decay_ratio))
+    else:
+        # Adam uses full warmup-stable-decay schedule
+        if it < warmup_iters:
+            return (it + 1) / float(warmup_iters + 1)
+        if it < decay_start:
+            return 1.0
+        if it >= total_iters:
+            return 0.0
+        decay_ratio = (it - decay_start) / float(max(1, decay_iters))
+        return (1 - math.sqrt(decay_ratio))
 
 # logging
 if wandb_log and master_process:
@@ -362,12 +370,11 @@ for epoch in range(math.ceil(num_epochs)):
             X, Y = X.to(device), Y.to(device)
 
         # determine and set the learning rate for this iteration
-        lr_multiplier = get_lr(global_iter) if decay_lr else 1.0
         for param_group in optimizer.param_groups:
             if param_group['use_muon']:
-                param_group['lr'] = muon_lr * lr_multiplier
+                param_group['lr'] = muon_lr * get_lr(global_iter, 'muon')
             else:
-                param_group['lr'] = adam_lr * lr_multiplier
+                param_group['lr'] = adam_lr * get_lr(global_iter, 'adam')
 
         # evaluate the loss on train/val sets and write checkpoints
         if global_iter > 0 and global_iter % eval_every_n_iters == 0 and master_process:
@@ -376,7 +383,7 @@ for epoch in range(math.ceil(num_epochs)):
             if wandb_log:
                 wandb.log({
                     "val/loss": val_loss,
-                    "lr": adam_lr * lr_multiplier,  # log Adam LR as representative
+                    "lr": adam_lr * get_lr(global_iter, 'adam'),  # log Adam LR as representative
                     "mfu": running_mfu*100, # convert to percentage
                     "tokens_seen": global_iter * batch_size * block_size,
                 }, step=global_iter)
@@ -457,8 +464,8 @@ for epoch in range(math.ceil(num_epochs)):
                 wandb.log({
                     "train/loss_step": lossf,
                     "train/grad_norm": grad_normf,
-                    "lr": adam_lr * lr_multiplier,  # log Adam LR as representative
-                    "muon_lr": muon_lr * lr_multiplier,  # also log Muon LR
+                    "lr": adam_lr * get_lr(global_iter, 'adam'),  # log Adam LR as representative
+                    "muon_lr": muon_lr * get_lr(global_iter, 'muon'),  # also log Muon LR
                     "mfu": running_mfu*100,
                     "tok_per_sec": running_tokens_per_sec,
                     "time_ms": dt*1000,
