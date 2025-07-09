@@ -642,7 +642,7 @@ class GPT(nn.Module):
         print(f"  Hidden gains/biases (Adam): {len(hidden_gains_biases)} tensors, {num_hidden_gains_biases:,} parameters")
         print(f"  Non-hidden params (Adam): {len(nonhidden_params)} tensors, {num_nonhidden_params:,} parameters")
         
-        optimizer = SingleDeviceMuonWithAuxAdam(param_groups, device_type)
+        optimizer = SingleDeviceMuonWithAuxAdam(param_groups)
         print(f"using Muon optimizer")
 
         return optimizer
