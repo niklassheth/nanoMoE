@@ -625,9 +625,11 @@ class GPT(nn.Module):
         # Create parameter groups for Muon
         param_groups = [
             dict(params=hidden_weights, use_muon=True,
-                 lr=muon_lr, weight_decay=0.01),
-            dict(params=hidden_gains_biases + nonhidden_params, use_muon=False,
-                 lr=adam_lr, betas=betas, weight_decay=0.01),
+                 lr=muon_lr, weight_decay=0.0),
+            dict(params=nonhidden_params, use_muon=False,
+                 lr=adam_lr, betas=betas, weight_decay=weight_decay),
+            dict(params=hidden_gains_biases, use_muon=False,
+                 lr=adam_lr, betas=betas, weight_decay=0.0),
         ]
         
         # Debug prints
@@ -640,7 +642,7 @@ class GPT(nn.Module):
         print(f"  Hidden gains/biases (Adam): {len(hidden_gains_biases)} tensors, {num_hidden_gains_biases:,} parameters")
         print(f"  Non-hidden params (Adam): {len(nonhidden_params)} tensors, {num_nonhidden_params:,} parameters")
         
-        optimizer = SingleDeviceMuonWithAuxAdam(param_groups)
+        optimizer = SingleDeviceMuonWithAuxAdam(param_groups, device_type)
         print(f"using Muon optimizer")
 
         return optimizer
