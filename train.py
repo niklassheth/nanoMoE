@@ -251,7 +251,7 @@ model.to(device)
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # optimizer
-optimizer = model.configure_optimizers(weight_decay, (beta1, beta2), device_type, adam_lr, muon_lr)
+optimizer = model.configure_optimizers(weight_decay, (beta1, beta2), adam_lr, muon_lr)
 
 # compile the model
 if compile:

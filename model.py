@@ -596,7 +596,7 @@ class GPT(nn.Module):
 
         return model
 
-    def configure_optimizers(self, weight_decay, betas, device_type, adam_lr, muon_lr):
+    def configure_optimizers(self, weight_decay, betas, adam_lr, muon_lr):
         # start with all of the candidate parameters
         param_dict = {pn: p for pn, p in self.named_parameters()}
         # filter out those that do not require grad

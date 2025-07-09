@@ -56,7 +56,7 @@ gptconf = GPTConfig(
 model = GPT(gptconf)
 model.to(device)
 
-optimizer = model.configure_optimizers(weight_decay=1e-2, betas=(0.9, 0.95), device_type=device_type, adam_lr=1e-4, muon_lr=1e-4 * 67)
+optimizer = model.configure_optimizers(weight_decay=1e-2, betas=(0.9, 0.95), adam_lr=1e-4, muon_lr=1e-4 * 67)
 
 if compile:
     print("Compiling model...")
