@@ -386,7 +386,14 @@ class ScatterMoELayer(nn.Module):
                     # Compute routing probabilities for aux loss
                     routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
                     routing_weights_topk, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
-                    aux_loss = self.compute_aux_loss(routing_weights.view(B, T, -1), selected_experts.view(B, T, -1))
+                    # Build a sparse probability tensor that contains only the top-k probabilities,
+                    # matching the behavior of the custom Router implementation.
+                    all_probs = torch.zeros_like(routing_weights)
+                    all_probs.scatter_(-1, selected_experts, routing_weights_topk)
+                    aux_loss = self.compute_aux_loss(
+                        all_probs.view(B, T, -1),
+                        selected_experts.view(B, T, -1)
+                    )
                     MANAGER.add_aux_loss(aux_loss)
             
             # Get routing weights and selected experts for ScatterMoE
