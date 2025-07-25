@@ -65,6 +65,7 @@ bias = False # do we use bias inside LayerNorm and Linear layers?
 # moe
 n_exp = 1 # if n_exp = 1 we just use regular MLP layers
 top_k = 2
+use_scattermoe = False # use ScatterMoE implementation instead of custom MoE
 use_aux_loss = False
 use_router_z_loss = False
 use_noisy_top_k = False
