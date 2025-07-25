@@ -18,6 +18,8 @@ from torch.nn import functional as F
 
 from manager import MANAGER
 
+from scattermoe.mlp import MLP as ScatterMLP
+
 
 class CausalSelfAttention(nn.Module):
 
@@ -331,6 +333,103 @@ class MOELayer(nn.Module):
         # Reshape output back to the original input shape
         return output_flat.view(B, T, C)
 
+class ScatterMoELayer(nn.Module):
+    """
+    ScatterMoE-based MoE layer that preserves auxiliary loss and router z-loss functionality
+    while using ScatterMoE's optimized scatter/gather operations.
+    """
+    def __init__(self, config):
+        super().__init__()
+        
+        self.hidden_dim = config.n_embd
+        self.num_experts = config.n_exp
+        self.top_k = config.top_k
+        
+        # Router settings for loss computation
+        self.use_aux_loss = config.use_aux_loss
+        self.use_router_z_loss = config.use_router_z_loss
+        self.router_use_full_prec = config.router_use_full_prec
+        
+        # Simple gate for routing (like Mixtral)
+        self.gate = nn.Linear(self.hidden_dim, self.num_experts, bias=False)
+        
+        # ScatterMoE MLP with ReLUSquared activation
+        self.moe_mlp = ScatterMLP(
+            input_size=self.hidden_dim,
+            hidden_size=4 * self.hidden_dim,  # Following the existing MLP pattern
+            activation=ReLUSquared(),
+            num_experts=self.num_experts,
+            top_k=self.top_k
+        )
+    
+    def forward(self, x: torch.Tensor):
+        B, T, C = x.size()
+        
+        # Flatten input for processing
+        x_flat = x.view(-1, C)  # [B*T, C]
+        
+        # Router can be sensitive to precision, so optionally use full float32
+        device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
+        ctx = nullcontext() if not self.router_use_full_prec else torch.amp.autocast(device_type=device_type, enabled=False)
+        
+        with ctx:
+            # Get router logits
+            router_logits = self.gate(x_flat)  # [B*T, num_experts]
+            
+            # Compute losses if training (preserve existing loss functionality)
+            if self.training:
+                if self.use_router_z_loss:
+                    z_loss = self.compute_router_z_loss(router_logits.view(B, T, -1))
+                    MANAGER.add_router_z_loss(z_loss)
+                
+                if self.use_aux_loss:
+                    # Compute routing probabilities for aux loss
+                    routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+                    routing_weights_topk, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+                    aux_loss = self.compute_aux_loss(routing_weights.view(B, T, -1), selected_experts.view(B, T, -1))
+                    MANAGER.add_aux_loss(aux_loss)
+            
+            # Get routing weights and selected experts for ScatterMoE
+            routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+            routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+            routing_weights = routing_weights.to(x_flat.dtype)
+            
+            # Apply ScatterMoE
+            output_flat = self.moe_mlp(x_flat, routing_weights, selected_experts)
+            
+        # Reshape back to original shape
+        return output_flat.view(B, T, C)
+    
+    def compute_aux_loss(self, expert_probs: torch.Tensor, indices: torch.Tensor):
+        """
+        Computes Switch Transformer auxiliary loss (https://arxiv.org/abs/2101.03961)
+        See equations (4)-(6) on page 7
+        """
+        # equation (5): compute ratio of tokens allocated to each expert
+        with torch.no_grad():
+            one_hot_indices = F.one_hot(indices, num_classes=self.num_experts)  # [B, T, k, num_experts]
+            one_hot_indices = torch.sum(one_hot_indices.float(), dim=2)  # [B, T, num_experts] (sum over k dimension)
+            tokens_per_expert = torch.mean(one_hot_indices.float(), dim=(0, 1))
+
+        # equation (6): compute ratio of router probability allocated to each expert
+        prob_per_expert = torch.mean(expert_probs.float(), dim=(0, 1))
+
+        # equation (4): take a scaled dot product between prob/token allocation vectors
+        # multiply the result by the number of experts
+        return self.num_experts * torch.sum(prob_per_expert * tokens_per_expert)
+    
+    def compute_router_z_loss(self, logits: torch.Tensor):
+        """
+        Computes ST-MoE router z loss (https://arxiv.org/abs/2202.08906)
+        See equation (5) on page 7
+        """
+        # exponentiate logits, sum logits of each expert, take log, and square
+        z_loss = torch.logsumexp(logits, dim=-1) ** 2.0  # [B, T]
+
+        # sum over all tokens and divide by total number of tokens
+        return torch.mean(z_loss)
+
 class Block(nn.Module):
 
     def __init__(self, config, use_moe=False):
@@ -339,7 +438,10 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config)
         self.ln_2 = nn.RMSNorm(config.n_embd, eps=1e-6, elementwise_affine=True)
         if use_moe:
-            self.mlp = MOELayer(config)
+            if config.use_scattermoe:
+                self.mlp = ScatterMoELayer(config)
+            else:
+                self.mlp = MOELayer(config)
         else:
             self.mlp = MLP(config)
 
@@ -360,6 +462,7 @@ class GPTConfig:
     # MoE-related configs 
     n_exp: int = 1 # if n_exp = 1 we just use regular MLP layers
     top_k: int = 2
+    use_scattermoe: bool = False # use ScatterMoE implementation instead of custom MoE
     use_aux_loss: bool = False # apply auxiliary loss (from Switch Transformer) in router
     use_router_z_loss: bool = False # apply router z loss (from ST-MoE)
     use_noisy_top_k: bool = False

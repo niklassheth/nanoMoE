@@ -25,24 +25,26 @@ router_use_full_prec = True
 
 # use smaller GPT model
 n_layer = 8
-n_head = 8
+n_head = 4 # 128 head size works better with qknorm (?)
 n_embd = 512
 
 # these make the total batch size be ~0.5M
 # 12 batch size * 1024 block size * 5 gradaccum * 8 GPUs = 491,520
-batch_size = 32
+batch_size = 64
 block_size = 512
 gradient_accumulation_steps = 2
 
 # epoch-based training
-num_epochs = 1.0
-evals_per_epoch = 50
+num_epochs = 10.0
+evals_per_epoch = 20
 warmup_frac = 0.01
 decay_frac = 0.1
 
 # eval stuff
-eval_iters = 200
-log_interval = 10
+eval_iters = 100
+log_interval = 50 # slow as balls
 
 # weight decay
 weight_decay = 1e-1
+learning_rate = 1.1e-3
+#grad_clip = 1.0
