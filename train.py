@@ -213,10 +213,11 @@ if os.path.exists(meta_path):
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
                   bias=bias, vocab_size=None, n_exp=n_exp, top_k=top_k,
-                  use_aux_loss=use_aux_loss, use_router_z_loss=use_router_z_loss,
-                  use_noisy_top_k=use_noisy_top_k, aux_loss_weight=aux_loss_weight,
-                  router_z_loss_weight=router_z_loss_weight, train_capacity=train_capacity,
-                  eval_capacity=eval_capacity, min_capacity=min_capacity, stride=stride,
+                  use_scattermoe=use_scattermoe, use_aux_loss=use_aux_loss,
+                  use_router_z_loss=use_router_z_loss, use_noisy_top_k=use_noisy_top_k,
+                  aux_loss_weight=aux_loss_weight, router_z_loss_weight=router_z_loss_weight,
+                  train_capacity=train_capacity, eval_capacity=eval_capacity,
+                  min_capacity=min_capacity, stride=stride,
                   use_switch_tfm_init=use_switch_tfm_init, switch_tfm_init_scale=switch_tfm_init_scale,
                   router_use_full_prec=router_use_full_prec) # start with model_args from command line
 print('\n\n')
