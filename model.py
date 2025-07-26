@@ -625,6 +625,9 @@ class GPT(nn.Module):
             x = block(x)
         x = self.transformer.ln_f(x)
 
+        loss = None
+        aux_loss = None
+        router_z_loss = None
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
@@ -632,17 +635,18 @@ class GPT(nn.Module):
 
             # add the auxiliary load balancing loss and router z loss to the main loss
             if self.config.n_exp > 1 and self.config.use_aux_loss:
-                loss += self.config.aux_loss_weight * MANAGER.aggregate_aux_loss()
+                aux_loss = MANAGER.aggregate_aux_loss()
+                loss += self.config.aux_loss_weight * aux_loss
                 MANAGER.reset_aux_loss()
             if self.config.n_exp > 1 and self.config.use_router_z_loss:
-                loss += self.config.router_z_loss_weight * MANAGER.aggregate_router_z_loss()
+                router_z_loss = MANAGER.aggregate_router_z_loss()
+                loss += self.config.router_z_loss_weight * router_z_loss
                 MANAGER.reset_router_z_loss()
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
-            loss = None
 
-        return logits, loss
+        return logits, loss, aux_loss, router_z_loss
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
@@ -785,7 +789,7 @@ class GPT(nn.Module):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
+            logits, _, _, _ = self(idx_cond)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options

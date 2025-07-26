@@ -285,8 +285,8 @@ def estimate_loss():
             X, Y = X.to(device), Y.to(device)
             
         with ctx:
-            _, loss = model(X, Y)
-        val_losses[k] = loss.item()
+            _, loss, _, _ = model(X, Y)
+        val_losses[k] = val_loss.item()
     
     model.train()
     return val_losses.mean()
@@ -404,7 +404,7 @@ for epoch in range(math.ceil(num_epochs)):
         with record_function("forward_backward"):
             with ctx:
                 with record_function("forward"):
-                    logits, loss = model(X, Y)
+                    logits, loss, aux_loss, router_z_loss = model(X, Y)
                     loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
             
             # backward pass, with gradient scaling if training in fp16
@@ -451,7 +451,7 @@ for epoch in range(math.ceil(num_epochs)):
             })
             
             if wandb_log:
-                wandb.log({
+                log_data = {
                     "train/loss_step": lossf,
                     "train/grad_norm": grad_normf,
                     "lr": lr,
@@ -459,7 +459,12 @@ for epoch in range(math.ceil(num_epochs)):
                     "tok_per_sec": running_tokens_per_sec,
                     "time_ms": dt*1000,
                     "tokens_seen": global_iter * batch_size * block_size,
-                }, step=global_iter)
+                }
+                if aux_loss is not None:
+                    log_data['train/load_balancing_loss'] = aux_loss.item()
+                if router_z_loss is not None:
+                    log_data['train/router_z_loss'] = router_z_loss.item()
+                wandb.log(log_data, step=global_iter)
         
         # Profiler step
         if profiler is not None:
