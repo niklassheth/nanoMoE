@@ -256,9 +256,11 @@ class MLPExperts(nn.Module):
         super().__init__()
         self.bias = config.bias
 
-        self.c_fc = nn.Parameter(torch.empty(config.n_exp, config.n_embd, 4 * config.n_embd))
-        self.c_proj = nn.Parameter(torch.empty(config.n_exp, 4 * config.n_embd, config.n_embd))
-        self.fc_bias = nn.Parameter(torch.empty(config.n_exp, 1, 4 * config.n_embd)) if self.bias else None
+        hidden_dim = 4 * config.n_embd if config.moe_hidden_size is None else config.moe_hidden_size
+
+        self.c_fc = nn.Parameter(torch.empty(config.n_exp, config.n_embd, hidden_dim))
+        self.c_proj = nn.Parameter(torch.empty(config.n_exp, hidden_dim, config.n_embd))
+        self.fc_bias = nn.Parameter(torch.empty(config.n_exp, 1, hidden_dim)) if self.bias else None
         self.proj_bias = nn.Parameter(torch.empty(config.n_exp, 1, config.n_embd)) if self.bias else None
         # Use ReLU-squared activation
         self.act = ReLUSquared()
@@ -353,10 +355,12 @@ class ScatterMoELayer(nn.Module):
         # Simple gate for routing (like Mixtral)
         self.gate = nn.Linear(self.hidden_dim, self.num_experts, bias=False)
         
+        hidden_size = 4 * self.hidden_dim if config.moe_hidden_size is None else config.moe_hidden_size
+        
         # ScatterMoE MLP with ReLUSquared activation
         self.moe_mlp = ScatterMLP(
             input_size=self.hidden_dim,
-            hidden_size=4 * self.hidden_dim,  # Following the existing MLP pattern
+            hidden_size=hidden_size,  # Following the existing MLP pattern
             activation=ReLUSquared(),
             num_experts=self.num_experts,
             top_k=self.top_k
@@ -469,6 +473,7 @@ class GPTConfig:
     # MoE-related configs 
     n_exp: int = 1 # if n_exp = 1 we just use regular MLP layers
     top_k: int = 2
+    moe_hidden_size: int = None # if not set, defaults to 4 * n_embd
     use_scattermoe: bool = False # use ScatterMoE implementation instead of custom MoE
     use_aux_loss: bool = False # apply auxiliary loss (from Switch Transformer) in router
     use_router_z_loss: bool = False # apply router z loss (from ST-MoE)

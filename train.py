@@ -65,7 +65,7 @@ bias = False # do we use bias inside LayerNorm and Linear layers?
 # moe
 n_exp = 1 # if n_exp = 1 we just use regular MLP layers
 top_k = 2
-use_scattermoe = False # use ScatterMoE implementation instead of custom MoE
+moe_hidden_size = None # if not set, defaults to 4 * n_embd
 use_aux_loss = False
 use_router_z_loss = False
 use_noisy_top_k = False
@@ -80,11 +80,14 @@ switch_tfm_init_scale = 1.0  # recommended 0.1 for stability (pg.10, https://arx
 router_use_full_prec = False
 
 # adamw optimizer
-learning_rate = 6e-4 # max learning rate
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
 grad_clip = 0.0 # clip gradients at this value, or disable if == 0.0
+
+# muon optimizer learning rates
+adam_lr = 6e-4 # learning rate for Adam params (gains/biases + non-hidden)
+muon_lr = 6e-4 * 67 # learning rate for Muon params (hidden weights)
 
 # epoch-based training
 num_epochs = 1.0  # total number of epochs to train (can be fractional)
@@ -92,8 +95,6 @@ evals_per_epoch = 10  # number of evaluations per epoch
 warmup_frac = 0.01  # fraction of total steps used for warmup
 decay_frac = 0.1    # fraction of total steps used for final decay
 
-# learning rate schedule
-decay_lr = True  # whether to use the warmup/stable/decay schedule
 
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
@@ -113,7 +114,7 @@ profiler_output_dir = './profiler_results' # directory to save profiler results
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 # Remove non-existent variables that were removed during epoch-based conversion
-config_keys = [k for k in config_keys if k not in ['max_iters', 'lr_decay_iters', 'eval_interval']]
+config_keys = [k for k in config_keys if k not in ['max_iters', 'lr_decay_iters', 'eval_interval', 'decay_lr']]
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys}  # will be useful for logging
 print(config)
@@ -213,13 +214,12 @@ if os.path.exists(meta_path):
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
                   bias=bias, vocab_size=None, n_exp=n_exp, top_k=top_k,
-                  use_scattermoe=use_scattermoe, use_aux_loss=use_aux_loss,
+                  moe_hidden_size=moe_hidden_size, use_aux_loss=use_aux_loss,
                   use_router_z_loss=use_router_z_loss, use_noisy_top_k=use_noisy_top_k,
                   aux_loss_weight=aux_loss_weight, router_z_loss_weight=router_z_loss_weight,
-                  train_capacity=train_capacity, eval_capacity=eval_capacity,
-                  min_capacity=min_capacity, stride=stride,
-                  use_switch_tfm_init=use_switch_tfm_init, switch_tfm_init_scale=switch_tfm_init_scale,
-                  router_use_full_prec=router_use_full_prec) # start with model_args from command line
+                  train_capacity=train_capacity, eval_capacity=eval_capacity, min_capacity=min_capacity,
+                  stride=stride, use_switch_tfm_init=use_switch_tfm_init,
+                  switch_tfm_init_scale=switch_tfm_init_scale, router_use_full_prec=router_use_full_prec) # start with model_args from command line
 print('\n\n')
 print(model_args)
 print('\n\n')
@@ -250,7 +250,7 @@ model.to(device)
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # optimizer
-optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
+optimizer = model.configure_optimizers(weight_decay, (beta1, beta2), adam_lr, muon_lr)
 
 # compile the model
 if compile:
@@ -266,41 +266,51 @@ if ddp:
 @torch.no_grad()
 def estimate_loss():
     model.eval()
-    
+
     val_losses = torch.zeros(eval_iters)
     val_iter = iter(val_loader)
-    
+
     for k in range(eval_iters):
         try:
             X, Y = next(val_iter)
         except StopIteration:
             val_iter = iter(val_loader)
             X, Y = next(val_iter)
-        
+
         # Move to device
         if device_type == 'cuda':
             X, Y = X.to(device, non_blocking=True), Y.to(device, non_blocking=True)
         else:
             X, Y = X.to(device), Y.to(device)
-            
+
         with ctx:
             _, loss = model(X, Y)
         val_losses[k] = loss.item()
-    
+
     model.train()
     return val_losses.mean()
 
 # learning rate scheduler (warmup -> stable -> decay to zero)
-def get_lr(it: int) -> float:
-    """Compute learning rate at iteration it."""
-    if it < warmup_iters:
-        return learning_rate * (it + 1) / float(warmup_iters + 1)
-    if it < decay_start:
-        return learning_rate
-    if it >= total_iters:
-        return 0.0
-    decay_ratio = (it - decay_start) / float(max(1, decay_iters))
-    return learning_rate * (1 - math.sqrt(decay_ratio))
+def get_lr(it: int, optimizer_type: str = 'adam') -> float:
+    """Compute learning rate multiplier at iteration it."""
+    if optimizer_type == 'muon':
+        # Muon skips warmup - start at 1.0, then follow stable-decay schedule
+        if it < decay_start:
+            return 1.0
+        if it >= total_iters:
+            return 0.0
+        decay_ratio = (it - decay_start) / float(max(1, decay_iters))
+        return (1 - math.sqrt(decay_ratio))
+    else:
+        # Adam uses full warmup-stable-decay schedule
+        if it < warmup_iters:
+            return (it + 1) / float(warmup_iters + 1)
+        if it < decay_start:
+            return 1.0
+        if it >= total_iters:
+            return 0.0
+        decay_ratio = (it - decay_start) / float(max(1, decay_iters))
+        return (1 - math.sqrt(decay_ratio))
 
 # logging
 if wandb_log and master_process:
@@ -322,7 +332,7 @@ if use_profiler and master_process:
     activities = [ProfilerActivity.CPU]
     if device_type == 'cuda':
         activities.append(ProfilerActivity.CUDA)
-    
+
     profiler = profile(
         activities=activities,
         schedule=torch.profiler.schedule(
@@ -348,12 +358,12 @@ for epoch in range(math.ceil(num_epochs)):
         pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}", unit="batch")
     else:
         pbar = train_loader
-    
+
     for batch_idx, (X, Y) in enumerate(pbar):
         if global_iter >= total_iters:
             break
         grad_norm = None  # Initialize gradient norm for logging
-        
+
         # Move to device
         if device_type == 'cuda':
             X, Y = X.to(device, non_blocking=True), Y.to(device, non_blocking=True)
@@ -361,9 +371,11 @@ for epoch in range(math.ceil(num_epochs)):
             X, Y = X.to(device), Y.to(device)
 
         # determine and set the learning rate for this iteration
-        lr = get_lr(global_iter) if decay_lr else learning_rate
         for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
+            if param_group['use_muon']:
+                param_group['lr'] = muon_lr * get_lr(global_iter, 'muon')
+            else:
+                param_group['lr'] = adam_lr * get_lr(global_iter, 'adam')
 
         # evaluate the loss on train/val sets and write checkpoints
         if global_iter > 0 and global_iter % eval_every_n_iters == 0 and master_process:
@@ -372,7 +384,7 @@ for epoch in range(math.ceil(num_epochs)):
             if wandb_log:
                 wandb.log({
                     "val/loss": val_loss,
-                    "lr": lr,
+                    "lr": adam_lr * get_lr(global_iter, 'adam'),  # log Adam LR as representative
                     "mfu": running_mfu*100, # convert to percentage
                     "tokens_seen": global_iter * batch_size * block_size,
                 }, step=global_iter)
@@ -394,22 +406,22 @@ for epoch in range(math.ceil(num_epochs)):
 
         # forward backward update, with optional gradient accumulation to simulate larger batch size
         # and using the GradScaler if data type is float16
-        
+
         # Handle DDP gradient sync - only sync when we're about to step the optimizer
         if ddp:
             model.require_backward_grad_sync = (global_iter % gradient_accumulation_steps == gradient_accumulation_steps - 1)
-        
+
         # Forward and backward pass for this batch
         with record_function("forward_backward"):
             with ctx:
                 with record_function("forward"):
                     logits, loss = model(X, Y)
                     loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
-            
+
             # backward pass, with gradient scaling if training in fp16
             with record_function("backward"):
                 scaler.scale(loss).backward()
-        
+
         # Only step optimizer every gradient_accumulation_steps iterations
         if (global_iter + 1) % gradient_accumulation_steps == 0:
             with record_function("optimizer_step"):
@@ -441,25 +453,26 @@ for epoch in range(math.ceil(num_epochs)):
                 running_tokens_per_sec = tokens_ps if running_tokens_per_sec == -1.0 else 0.9 * running_tokens_per_sec + 0.1 * tokens_ps
                 mfu = raw_model.estimate_mfu(batch_size, dt)
                 running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
-            
+
             # Update tqdm progress bar with loss, tok/s, and MFU
             pbar.set_postfix({
                 'loss': f'{lossf:.4f}',
                 'tok/s': tqdm.format_sizeof(running_tokens_per_sec, divisor=1000),
                 'mfu': f'{running_mfu*100:.2f}%'
             })
-            
+
             if wandb_log:
                 wandb.log({
                     "train/loss_step": lossf,
                     "train/grad_norm": grad_normf,
-                    "lr": lr,
-                    "mfu": running_mfu*100,
+                    "lr": adam_lr * get_lr(global_iter, 'adam'),  # log Adam LR as representative
+                    "muon_lr": muon_lr * get_lr(global_iter, 'muon'),  # also log Muon LR
+                    "mfu": running_mfu,
                     "tok_per_sec": running_tokens_per_sec,
                     "time_ms": dt*1000,
                     "tokens_seen": global_iter * batch_size * block_size,
                 }, step=global_iter)
-        
+
         # Profiler step
         if profiler is not None:
             profiler.step()
