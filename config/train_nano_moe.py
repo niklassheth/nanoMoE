@@ -12,6 +12,7 @@ wandb_run_name ='tinystories-moe' + time.strftime('%Y-%m-%d %H:%M:%S')
 # model/moe settings
 n_exp = 4
 top_k = 2
+moe_hidden_size = 1024 # custom hidden size for MoE MLP
 use_aux_loss = True
 aux_loss_weight = 0.01
 use_router_z_loss = True
